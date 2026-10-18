@@ -25,10 +25,20 @@ const REGION_MARKS: Array = [
 	Vector3(-0.16, 0.38, -0.30),
 	Vector3(0.16, 0.38, -0.30),
 ]
-# Day ambient is 0.9. Below that line the person is losing warmth. The far mark
-# waits until it is obvious at holding zoom, so a mild day does not paint the acre.
+# Day ambient is 0.9. The shawl shows once warmth is falling. Below 0.70 the
+# body itself is cold: an ice tint, arms hugged in, and a shiver. A ground
+# post was read as a stake, and a ring was read as selection, so neither is
+# the cold cue. The shiver is view motion, not a sim tick.
 const COLD_CLOSE := 0.82
 const COLD_FAR := 0.70
+# One left-right cycle. Lateral sway plus a faster jitter, a bob, and a roll.
+const SHIVER_PERIOD_FRAMES := 6
+const SHIVER_AMPLITUDE_M := 0.30
+const SHIVER_JITTER_M := 0.12
+const SHIVER_BOB_M := 0.09
+const SHIVER_ROLL_DEG := 16.0
+const COLD_HUNCH_DEG := 26.0
+const COLD_BODY := Color(0.55, 0.88, 1.0)
 # 1a starting amounts from the sim rules. Mesh scale is remaining over these.
 const NODE_START := {
 	"wood": 40,
@@ -95,8 +105,11 @@ var wrap_mat: StandardMaterial3D
 var treated_mat: StandardMaterial3D
 var hurt_mark_mat: StandardMaterial3D
 var cold_mat: StandardMaterial3D
-var cold_mark_mat: StandardMaterial3D
+var arm_mat: StandardMaterial3D
 var sleep_roll_mat: StandardMaterial3D
+var _shiver_frame := 0
+var _shiver_frozen := false
+var _shiver_logged := false
 var blanket_mat: StandardMaterial3D
 var foot_mat: StandardMaterial3D
 
@@ -133,6 +146,14 @@ func _process(_delta: float) -> void:
 	# Zoom changes the orthographic size without a new snapshot. The label has
 	# to track that, or a fixed-pixel billboard covers the ring on the way out.
 	_fit_job_labels()
+	# Screen-relative, so a 90 degree camera snap cannot hide the limp behind
+	# the body or park the hurt flag under the job word.
+	_place_side_marks()
+	_place_limps()
+	if not _shiver_frozen:
+		_shiver_frame += 1
+	_apply_shiver()
+	_place_cold_cues()
 
 
 func set_item_names(items: Array) -> void:
@@ -400,15 +421,25 @@ func _style_person(body: AnimatableBody3D, row: Dictionary, selected: bool, mark
 	if label != null:
 		label.text = _job_name(row, tick)
 		_fit_job_label(label, selected)
-	_apply_condition(body, row)
+	_apply_condition(body, row, tick)
 
 
-func _apply_condition(body: AnimatableBody3D, row: Dictionary) -> void:
+func _apply_condition(body: AnimatableBody3D, row: Dictionary, tick: int) -> void:
 	var regions := _region_rows(row)
 	var resting := _int_of(row.get("job", -1), -1) == JOB_REST
 	_apply_wounds(body, regions)
 	_apply_posture(body, regions, resting)
 	_apply_cold(body, row)
+	body.set_meta("limp_left", _leg_severity(regions, 4))
+	body.set_meta("limp_right", _leg_severity(regions, 5))
+	body.set_meta("limp_resting", resting)
+	body.set_meta("limp_walking", _has_route(row) and not resting)
+	body.set_meta("limp_tick", tick)
+	_place_limps()
+	# Snapshot apply resets the pose. Put the shiver back before the frame
+	# is drawn, or a still lands on the unshivered anchor.
+	_apply_shiver()
+	_place_cold_cues()
 
 
 func _apply_wounds(body: AnimatableBody3D, regions: Array) -> void:
@@ -430,10 +461,11 @@ func _apply_wounds(body: AnimatableBody3D, regions: Array) -> void:
 		var mark := wounds.get_child(slot) as Node3D
 		if mark == null:
 			continue
+		var bleeding := _float_of(entry.get("bleeding", 0.0), 0.0)
+		var infected := _float_of(entry.get("infected", 0.0), 0.0)
 		var severity := _region_severity(entry)
 		var bandaged := _flag(entry.get("bandaged", false))
 		var treated := _flag(entry.get("treated", false))
-		var infected := _float_of(entry.get("infected", 0.0), 0.0)
 		var open := severity > 0.001 or bandaged or treated
 		mark.visible = open
 		if not open:
@@ -445,19 +477,23 @@ func _apply_wounds(body: AnimatableBody3D, regions: Array) -> void:
 		var wrap := mark.get_node_or_null("Wrap") as Node3D
 		var sick := mark.get_node_or_null("Sick") as Node3D
 		var dot := mark.get_node_or_null("Dot") as MeshInstance3D
-		var scale := lerpf(0.85, 1.45, severity)
+		var scale := lerpf(1.0, 1.2, severity)
+		# A trace of infection must not repaint a bleed. The yellow-green mark
+		# is its own shape, and it waits until the infection is something to see.
+		var bleed_open := bleeding > 0.001
+		var infect_open := infected > 0.08
 		if stain != null:
-			stain.visible = severity > 0.001 and not bandaged
+			stain.visible = (bleed_open or infect_open) and not bandaged
 			stain.scale = Vector3.ONE * scale
-			_paint(stain, infect_mat if infected > 0.001 else wound_mat)
+			_paint(stain, wound_mat if bleed_open else infect_mat)
 		if wrap != null:
 			wrap.visible = bandaged
-			wrap.scale = Vector3.ONE * lerpf(0.95, 1.2, severity)
-			_paint(wrap, infect_mat if infected > 0.001 else wrap_mat)
+			wrap.scale = Vector3.ONE * lerpf(1.0, 1.15, severity)
+			_paint(wrap, infect_mat if infect_open else wrap_mat)
 		if sick != null:
-			# A wider band, not a splatter. Close zoom: it sits outside the stain.
-			sick.visible = infected > 0.001
-			sick.scale = Vector3.ONE * lerpf(0.9, 1.25, clampf(infected, 0.0, 1.0))
+			sick.visible = infect_open and not bandaged
+			sick.scale = Vector3.ONE * lerpf(0.95, 1.2, clampf(infected, 0.0, 1.0))
+			_paint(sick, infect_mat)
 		if dot != null:
 			dot.visible = treated
 	if hurt != null:
@@ -486,6 +522,7 @@ func _apply_posture(body: AnimatableBody3D, regions: Array, resting: bool) -> vo
 			stand.disabled = true
 		if lying != null:
 			lying.disabled = false
+		_capture_pose(pose)
 		return
 	if blanket != null:
 		blanket.visible = false
@@ -501,39 +538,375 @@ func _apply_posture(body: AnimatableBody3D, regions: Array, resting: bool) -> vo
 	if left <= 0.001 and right <= 0.001:
 		pose.rotation_degrees = Vector3.ZERO
 		pose.position = Vector3.ZERO
+		_capture_pose(pose)
 		return
-	# A hurt leg leans onto the good one and drags a foot. Both legs: a hunch.
-	var roll := 0.0
-	var pitch := 0.0
-	if left > 0.001 and right > 0.001:
-		pitch = lerpf(8.0, 16.0, maxf(left, right))
-	elif left > 0.001:
-		roll = -lerpf(8.0, 16.0, left)
-		pitch = lerpf(4.0, 8.0, left)
-	else:
-		roll = lerpf(8.0, 16.0, right)
-		pitch = lerpf(4.0, 8.0, right)
-	pose.rotation_degrees = Vector3(pitch, 0.0, roll)
-	pose.position = Vector3(0.0, -0.06, 0.0)
+	# The screen-relative drag in _place_limps is the limp. A small body-local
+	# roll did not read from the isometric camera, so this branch no longer
+	# pretends a 16 degree tilt is a stride.
+	pose.rotation_degrees = Vector3.ZERO
+	pose.position = Vector3.ZERO
+	_capture_pose(pose)
 
 
 func _apply_cold(body: AnimatableBody3D, row: Dictionary) -> void:
-	var shawl := body.get_node_or_null("Pose/Shawl") as MeshInstance3D
-	var mark := body.get_node_or_null("ColdMark") as Node3D
+	var shawl := body.get_node_or_null("Pose/Shawl") as Node3D
+	var drafted := bool(row.get("drafted", false))
 	if not row.has("warmth"):
+		body.set_meta("cold", false)
 		if shawl != null:
 			shawl.visible = false
-		if mark != null:
-			mark.visible = false
+		_paint_cold_body(body, false, drafted)
 		return
 	var warmth := _float_of(row.get("warmth"), 1.0)
 	var loss := clampf((COLD_CLOSE - warmth) / COLD_CLOSE, 0.0, 1.0)
+	var cold := warmth < COLD_FAR
+	body.set_meta("cold", cold)
 	if shawl != null:
 		shawl.visible = warmth < COLD_CLOSE
-		shawl.scale = Vector3(lerpf(0.85, 1.25, loss), 1.0, lerpf(0.8, 1.15, loss))
-	if mark != null:
-		mark.visible = warmth < COLD_FAR
-		mark.scale = Vector3(lerpf(0.85, 1.2, loss), 1.0, 1.0)
+		# Stay full size. Shrinking it back to tabs is how it stopped reading.
+		shawl.scale = Vector3(lerpf(1.0, 1.08, loss), 1.0, lerpf(1.0, 1.06, loss))
+	_paint_cold_body(body, cold, drafted)
+	if cold and not _shiver_logged:
+		_shiver_logged = true
+		print("latchsoil: cold body ice tint; shiver amplitude %.2f m plus %.2f m jitter, bob %.2f m, roll %.0f deg, hunch %.0f deg, period %d frames" % [SHIVER_AMPLITUDE_M, SHIVER_JITTER_M, SHIVER_BOB_M, SHIVER_ROLL_DEG, COLD_HUNCH_DEG, SHIVER_PERIOD_FRAMES])
+
+
+func _paint_cold_body(body: AnimatableBody3D, cold: bool, drafted: bool) -> void:
+	var mat := body.get_meta("body_mat") as StandardMaterial3D
+	if mat != null:
+		if cold:
+			# Unshaded. The key light is orange, and a shaded blue turns brown.
+			mat.albedo_color = COLD_BODY
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+			mat.emission_enabled = false
+		else:
+			mat.albedo_color = BODY_DRAFTED if drafted else BODY_TIMBER
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+			mat.cull_mode = BaseMaterial3D.CULL_BACK
+	var mesh_node := body.get_node_or_null("Pose/Body") as MeshInstance3D
+	if mesh_node != null:
+		# Wider, not taller. At holding zoom the capsule is a few pixels of
+		# ochre-on-ochre unless the cold body is a bigger ice mass.
+		mesh_node.scale = Vector3(1.45, 1.08, 1.45) if cold else Vector3.ONE
+
+
+func _capture_pose(pose: Node3D) -> void:
+	pose.set_meta("anchor_pos", pose.position)
+	pose.set_meta("anchor_basis", pose.basis)
+
+
+func freeze_shiver(frame: int) -> void:
+	_shiver_frame = frame
+	_shiver_frozen = true
+	_apply_shiver()
+	_place_cold_cues()
+
+
+func thaw_shiver() -> void:
+	_shiver_frozen = false
+
+
+func _apply_shiver() -> void:
+	var phase := TAU * float(posmod(_shiver_frame, SHIVER_PERIOD_FRAMES)) / float(SHIVER_PERIOD_FRAMES)
+	var wave := sin(phase)
+	var jitter := sin(phase * 3.0)
+	var bob := absf(sin(phase * 2.0))
+	var axes := _screen_axes()
+	var right: Vector3 = axes[0]
+	var toward: Vector3 = axes[1]
+	for body in people.values():
+		if not body is Node3D:
+			continue
+		var node := body as Node3D
+		if not node.is_inside_tree():
+			continue
+		var pose := node.get_node_or_null("Pose") as Node3D
+		if pose == null or not pose.has_meta("anchor_pos"):
+			continue
+		var anchor_pos: Vector3 = pose.get_meta("anchor_pos")
+		var anchor_basis: Basis = pose.get_meta("anchor_basis")
+		var cold := bool(node.get_meta("cold", false))
+		if not cold:
+			pose.position = anchor_pos
+			pose.basis = anchor_basis
+			continue
+		var world_off := right * (wave * SHIVER_AMPLITUDE_M + jitter * SHIVER_JITTER_M) + Vector3.UP * bob * SHIVER_BOB_M
+		var local_off: Vector3 = node.global_transform.basis.inverse() * world_off
+		pose.position = anchor_pos + local_off
+		var resting := bool(node.get_meta("limp_resting", false))
+		var limping := float(node.get_meta("limp_left", 0.0)) > 0.001 or float(node.get_meta("limp_right", 0.0)) > 0.001
+		# Sleep and the limp own the basis. A cold hunch on top of either
+		# would erase the pose that already reads.
+		if resting or limping:
+			pose.basis = anchor_basis
+		else:
+			var local_right := _flat_local(node, right)
+			var local_toward := _flat_local(node, toward)
+			# Same axis construction as the limp, which is the tilt that reads
+			# from this camera. Head tips toward the camera, then rocks.
+			var hunch := _tip_toward(local_toward, COLD_HUNCH_DEG)
+			var roll := _tip_toward(local_right, wave * SHIVER_ROLL_DEG)
+			pose.basis = roll * hunch * anchor_basis
+		pose.force_update_transform()
+
+
+func _flat_local(node: Node3D, world_axis: Vector3) -> Vector3:
+	var local: Vector3 = node.global_transform.basis.inverse() * world_axis
+	local.y = 0.0
+	if local.length_squared() < 0.0001:
+		return Vector3(1.0, 0.0, 0.0)
+	return local.normalized()
+
+
+func _tip_toward(direction: Vector3, degrees: float) -> Basis:
+	var dir := direction
+	dir.y = 0.0
+	if dir.length_squared() < 0.0001 or absf(degrees) < 0.01:
+		return Basis.IDENTITY
+	dir = dir.normalized()
+	var axis := Vector3(-dir.z, 0.0, dir.x).normalized()
+	var positive := Basis(axis, deg_to_rad(absf(degrees)))
+	var negative := Basis(axis, deg_to_rad(-absf(degrees)))
+	var want := dir * signf(degrees)
+	if (positive * Vector3.UP).dot(want) >= (negative * Vector3.UP).dot(want):
+		return positive
+	return negative
+
+
+func _place_cold_cues() -> void:
+	var axes := _screen_axes()
+	var right: Vector3 = axes[0]
+	var toward: Vector3 = axes[1]
+	for body in people.values():
+		if not body is Node3D:
+			continue
+		var node := body as Node3D
+		if not node.is_inside_tree():
+			continue
+		var pose := node.get_node_or_null("Pose") as Node3D
+		if pose == null:
+			continue
+		var cold := bool(node.get_meta("cold", false))
+		var resting := bool(node.get_meta("limp_resting", false))
+		var arms := pose.get_node_or_null("Arms") as Node3D
+		if arms != null:
+			arms.visible = cold and not resting
+		if not cold or resting or arms == null:
+			continue
+		# Elbows well outside the capsule, hands crossed on the near side.
+		# A bar that stays inside the silhouette does not read as a hug.
+		var chest: Vector3 = pose.global_transform * Vector3(0.0, 1.05, 0.0)
+		var left_shoulder := chest + (-right) * 0.28 + Vector3.UP * 0.18
+		var right_shoulder := chest + right * 0.28 + Vector3.UP * 0.18
+		var left_elbow := chest + (-right) * 0.72 + toward * 0.28 + Vector3.UP * 0.10
+		var right_elbow := chest + right * 0.72 + toward * 0.28 + Vector3.UP * 0.10
+		var left_hand := chest + right * 0.16 + toward * 0.48 + Vector3.UP * -0.10
+		var right_hand := chest + (-right) * 0.16 + toward * 0.48 + Vector3.UP * -0.10
+		_span_named(arms, pose, "LeftUpper", left_shoulder, left_elbow)
+		_span_named(arms, pose, "RightUpper", right_shoulder, right_elbow)
+		_span_named(arms, pose, "Left", left_elbow, left_hand)
+		_span_named(arms, pose, "Right", right_elbow, right_hand)
+
+
+func _span_named(arms: Node3D, pose: Node3D, arm_name: String, from_world: Vector3, to_world: Vector3) -> void:
+	var arm := arms.get_node_or_null(arm_name) as MeshInstance3D
+	if arm != null:
+		_span_arm(arm, pose, from_world, to_world)
+
+
+func _span_arm(arm: MeshInstance3D, pose: Node3D, from_world: Vector3, to_world: Vector3) -> void:
+	var a: Vector3 = pose.global_transform.affine_inverse() * from_world
+	var b: Vector3 = pose.global_transform.affine_inverse() * to_world
+	var to := b - a
+	if to.length_squared() < 0.0004:
+		return
+	arm.position = (a + b) * 0.5
+	arm.basis = Basis.looking_at(to, Vector3.UP)
+	if arm.mesh is BoxMesh:
+		(arm.mesh as BoxMesh).size = Vector3(0.38, 0.32, to.length())
+
+
+func _make_shawl() -> Node3D:
+	var shawl := Node3D.new()
+	shawl.name = "Shawl"
+	shawl.visible = false
+	# A collar and two thin hangs. Side walls closed into a box and hid the body.
+	_cloth(shawl, Vector3(1.12, 0.10, 0.72), Vector3(0.0, 1.30, 0.0))
+	_cloth(shawl, Vector3(0.62, 0.52, 0.08), Vector3(0.0, 0.98, -0.38))
+	_cloth(shawl, Vector3(0.70, 0.58, 0.08), Vector3(0.0, 0.96, 0.40))
+	return shawl
+
+
+func _cloth(parent: Node3D, size: Vector3, at: Vector3) -> void:
+	var node := MeshInstance3D.new()
+	var mesh := BoxMesh.new()
+	mesh.size = size
+	node.mesh = mesh
+	node.position = at
+	node.material_override = cold_mat
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(node)
+
+
+func _view_camera() -> Camera3D:
+	var rig := get_node_or_null("../CameraRig")
+	if rig == null:
+		return null
+	return rig.get_node_or_null("Camera3D") as Camera3D
+
+
+func _screen_axes() -> Array:
+	var right := Vector3(1.0, 0.0, 0.0)
+	var toward := Vector3(0.0, 0.0, 1.0)
+	var cam := _view_camera()
+	if cam == null:
+		return [right, toward]
+	right = cam.global_transform.basis.x
+	right.y = 0.0
+	if right.length_squared() > 0.0001:
+		right = right.normalized()
+	# Camera looks down its -Z. Ground +Z of the camera is the near side,
+	# which is the bottom of an isometric frame.
+	toward = cam.global_transform.basis.z
+	toward.y = 0.0
+	if toward.length_squared() > 0.0001:
+		toward = toward.normalized()
+	return [right, toward]
+
+
+func _place_side_marks() -> void:
+	var axes := _screen_axes()
+	var right: Vector3 = axes[0]
+	for body in people.values():
+		if not body is Node3D:
+			continue
+		var node := body as Node3D
+		if not node.is_inside_tree():
+			continue
+		var local_right: Vector3 = node.global_transform.basis.inverse() * right
+		local_right.y = 0.0
+		if local_right.length_squared() < 0.0001:
+			continue
+		local_right = local_right.normalized()
+		var stake := node.get_node_or_null("HurtMark/Stake") as Node3D
+		if stake != null:
+			# Screen-right of the head. The job word stays centred above.
+			stake.position = local_right * 1.05 + Vector3(0.0, 0.45, 0.0)
+
+
+func _place_limps() -> void:
+	for body in people.values():
+		if not body is Node3D:
+			continue
+		var node := body as Node3D
+		if not node.is_inside_tree():
+			continue
+		if bool(node.get_meta("limp_resting", false)):
+			var support_hide := node.get_node_or_null("Pose/SupportLeg") as MeshInstance3D
+			if support_hide != null:
+				support_hide.visible = false
+			continue
+		var left := float(node.get_meta("limp_left", 0.0))
+		var right := float(node.get_meta("limp_right", 0.0))
+		var pose := node.get_node_or_null("Pose") as Node3D
+		if pose == null:
+			continue
+		if left <= 0.001 and right <= 0.001:
+			var support_off := node.get_node_or_null("Pose/SupportLeg") as MeshInstance3D
+			if support_off != null:
+				support_off.visible = false
+			continue
+		var axes := _screen_axes()
+		var screen_right: Vector3 = axes[0]
+		var toward: Vector3 = axes[1]
+		var walking := bool(node.get_meta("limp_walking", false))
+		var tick := _int_of(node.get_meta("limp_tick", 0), 0)
+		var step := 0.0
+		if walking:
+			step = sin(float(tick) * 0.55)
+		# Lean across the view, onto the good side, so the capsule itself is
+		# asymmetric and not only the dragged foot.
+		var hurt_sign := -1.0 if left >= right else 1.0
+		if left > 0.001 and right > 0.001:
+			hurt_sign = 0.0
+		# Onto the good side. hurt_sign points at the bad side.
+		var lean_world := toward if hurt_sign == 0.0 else -screen_right * hurt_sign
+		var local_lean: Vector3 = node.global_transform.basis.inverse() * lean_world
+		local_lean.y = 0.0
+		if local_lean.length_squared() < 0.0001:
+			local_lean = Vector3(1.0, 0.0, 0.0)
+		else:
+			local_lean = local_lean.normalized()
+		var axis := Vector3(-local_lean.z, 0.0, local_lean.x)
+		var lean := 26.0 if hurt_sign != 0.0 else 18.0
+		pose.basis = Basis(axis, deg_to_rad(-lean))
+		pose.position = local_lean * 0.1 + Vector3(0.0, -0.04, 0.0)
+		pose.force_update_transform()
+		_capture_pose(pose)
+		if left > 0.001:
+			_place_drag_leg(node, pose, 4, -1.0, left, screen_right, toward, step)
+		if right > 0.001:
+			_place_drag_leg(node, pose, 5, 1.0, right, screen_right, toward, step)
+		var support := node.get_node_or_null("Pose/SupportLeg") as MeshInstance3D
+		if support == null:
+			continue
+		var one := (left > 0.001) != (right > 0.001)
+		support.visible = one
+		if not one:
+			continue
+		var good_sign := 1.0 if left > 0.001 else -1.0
+		var plant := node.global_transform.origin + screen_right * good_sign * 0.46 + Vector3(0.0, 0.36, 0.0)
+		if walking and step > 0.0:
+			# Short step on the good leg. The hurt leg never swings forward.
+			plant += toward * 0.22 * step + Vector3(0.0, 0.16 * step, 0.0)
+		support.position = pose.global_transform.affine_inverse() * plant
+
+
+func _place_drag_leg(body: Node3D, pose: Node3D, slot: int, side_sign: float, severity: float, screen_right: Vector3, toward: Vector3, step: float) -> void:
+	var mark := body.get_node_or_null("Pose/Wounds/R%d" % slot) as Node3D
+	var limb := body.get_node_or_null("Pose/Wounds/R%d/Limb" % slot) as Node3D
+	if mark == null or limb == null:
+		return
+	var origin := body.global_transform.origin
+	var dir := (toward + screen_right * side_sign * 0.5).normalized()
+	# Dragged, and shorter than a full stride. Walking only lengthens the drag;
+	# the foot never comes up beside the good one.
+	var reach := lerpf(0.95, 1.35, severity) * lerpf(0.88, 1.0, absf(step))
+	var hip_world := origin + dir * 0.34 + Vector3(0.0, 0.76, 0.0)
+	var foot_world := origin + dir * (0.34 + reach) + Vector3(0.0, 0.12, 0.0)
+	var hip_local: Vector3 = pose.global_transform.affine_inverse() * hip_world
+	var foot_local: Vector3 = pose.global_transform.affine_inverse() * foot_world
+	mark.position = hip_local
+	var to := foot_local - hip_local
+	if to.length_squared() < 0.0004:
+		return
+	limb.position = Vector3.ZERO
+	limb.basis = Basis.looking_at(to, Vector3.UP)
+	var length := to.length()
+	var leg := limb.get_node_or_null("Leg") as MeshInstance3D
+	if leg != null and leg.mesh is BoxMesh:
+		var span := maxf(length - 0.28, 0.35)
+		(leg.mesh as BoxMesh).size = Vector3(0.32, 0.28, span)
+		leg.position = Vector3(0.0, 0.0, -span * 0.5)
+	var mid := to * 0.46 + limb.basis * Vector3(0.0, 0.16, 0.0)
+	var stain := mark.get_node_or_null("Stain") as Node3D
+	if stain != null:
+		stain.position = mid
+		stain.basis = limb.basis
+	var wrap := mark.get_node_or_null("Wrap") as Node3D
+	if wrap != null:
+		wrap.position = to * 0.55
+		wrap.basis = limb.basis
+	var sick := mark.get_node_or_null("Sick") as Node3D
+	if sick != null:
+		sick.position = to * 0.72 + limb.basis * Vector3(0.0, 0.12, 0.0)
+		sick.basis = limb.basis
+	var foot_name := "Left" if slot == 4 else "Right"
+	var foot := body.get_node_or_null("Pose/Feet/%s" % foot_name) as MeshInstance3D
+	if foot != null:
+		foot.position = foot_local
+		foot.rotation = Vector3.ZERO
 
 
 func _set_feet(body: AnimatableBody3D, left: bool, right: bool) -> void:
@@ -612,6 +985,8 @@ func _make_wound_mark(slot: int) -> Node3D:
 	mark.name = "R%d" % slot
 	mark.position = _region_at(slot)
 	mark.visible = false
+	if slot >= 2:
+		mark.add_child(_make_limb(slot))
 	var stain := Node3D.new()
 	stain.name = "Stain"
 	mark.add_child(stain)
@@ -620,19 +995,28 @@ func _make_wound_mark(slot: int) -> Node3D:
 	wrap.name = "Wrap"
 	wrap.visible = false
 	mark.add_child(wrap)
-	_add_region_shape(wrap, slot, wrap_mat, 1.15)
+	_add_region_shape(wrap, slot, wrap_mat, 1.05)
 	var sick := Node3D.new()
 	sick.name = "Sick"
 	sick.visible = false
 	mark.add_child(sick)
-	_add_region_shape(sick, slot, sick_mat, 1.4)
+	_add_region_shape(sick, slot, infect_mat, 0.85)
+	# Infection sits further down the limb than the bleed, so the two colours
+	# are two marks, not one chunk repainted.
+	if slot >= 4:
+		sick.position = Vector3(0.0, -0.08, 0.42)
+		# Two extra cloth bands so a wrap reads as wrapped, not as one pale box.
+		_decal_box(wrap, Vector3(0.48, 0.36, 0.14), Vector3(0.0, 0.0, -0.26), wrap_mat)
+		_decal_box(wrap, Vector3(0.48, 0.36, 0.14), Vector3(0.0, 0.0, 0.26), wrap_mat)
+	elif slot >= 2:
+		sick.position = Vector3(0.22 if slot == 3 else -0.22, -0.16, 0.0)
 	var dot := MeshInstance3D.new()
 	dot.name = "Dot"
 	var dot_mesh := SphereMesh.new()
-	dot_mesh.radius = 0.06
-	dot_mesh.height = 0.12
+	dot_mesh.radius = 0.08
+	dot_mesh.height = 0.16
 	dot.mesh = dot_mesh
-	dot.position = Vector3(0.0, 0.12, 0.0)
+	dot.position = Vector3(0.0, 0.22, 0.0)
 	dot.material_override = treated_mat
 	dot.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	dot.visible = false
@@ -640,36 +1024,65 @@ func _make_wound_mark(slot: int) -> Node3D:
 	return mark
 
 
+func _make_limb(slot: int) -> Node3D:
+	var limb := Node3D.new()
+	limb.name = "Limb"
+	var mesh := BoxMesh.new()
+	if slot <= 3:
+		mesh.size = Vector3(0.70, 0.24, 0.24)
+	else:
+		mesh.size = Vector3(0.32, 0.28, 0.9)
+	var leg := MeshInstance3D.new()
+	leg.name = "Leg"
+	leg.mesh = mesh
+	leg.material_override = _flat(BODY_TIMBER)
+	leg.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	if slot <= 3:
+		leg.position = Vector3(-0.42 if slot == 2 else 0.42, 0.0, 0.0)
+	else:
+		leg.position = Vector3(0.0, -0.35, 0.15)
+	limb.add_child(leg)
+	return limb
+
+
 func _region_at(slot: int) -> Vector3:
 	match slot:
 		0:
-			return Vector3(0.0, 1.46, 0.0)
+			return Vector3(0.0, 1.58, -0.08)
 		1:
-			return Vector3(0.0, 1.05, 0.0)
+			return Vector3(0.0, 1.08, 0.0)
 		2:
-			return Vector3(-0.50, 1.02, 0.0)
+			return Vector3(-0.46, 1.12, 0.0)
 		3:
-			return Vector3(0.50, 1.02, 0.0)
+			return Vector3(0.46, 1.12, 0.0)
 		4:
-			return Vector3(-0.30, 0.30, 0.10)
+			return Vector3(-0.20, 0.72, 0.0)
 		_:
-			return Vector3(0.30, 0.30, 0.10)
+			return Vector3(0.20, 0.72, 0.0)
 
 
 func _add_region_shape(parent: Node3D, slot: int, mat: Material, scale: float) -> void:
-	# A band around the trunk reads from every 90 degree camera snap. Arms and
-	# legs are a chunk on that side, outside the capsule, so the place is the side.
-	if slot <= 1:
-		var radius := 0.26 if slot == 0 else 0.42
-		_band(parent, radius * scale, 0.1 * scale, mat)
+	# Big enough to read at 4 m, and sitting on the region, not on the ground.
+	if slot == 0:
+		_decal_box(parent, Vector3(0.46, 0.24, 0.40) * scale, Vector3(0.0, 0.04, 0.0), mat)
 		return
-	var chunk := BoxMesh.new()
+	if slot == 1:
+		_band(parent, 0.46 * scale, 0.16 * scale, mat)
+		_decal_box(parent, Vector3(0.62, 0.36, 0.20) * scale, Vector3(0.0, 0.0, -0.28), mat)
+		return
 	if slot <= 3:
-		chunk.size = Vector3(0.28, 0.24, 0.24) * scale
-	else:
-		chunk.size = Vector3(0.24, 0.22, 0.3) * scale
+		var side := -1.0 if slot == 2 else 1.0
+		_decal_box(parent, Vector3(0.48, 0.32, 0.32) * scale, Vector3(side * 0.28, 0.0, 0.0), mat)
+		return
+	_decal_box(parent, Vector3(0.52, 0.40, 0.46) * scale, Vector3(0.0, 0.06, 0.12), mat)
+
+
+func _decal_box(parent: Node3D, size: Vector3, at: Vector3, mat: Material) -> void:
 	var node := MeshInstance3D.new()
+	var chunk := BoxMesh.new()
+	chunk.size = size
 	node.mesh = chunk
+	node.position = at
 	node.material_override = mat
 	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	parent.add_child(node)
@@ -701,10 +1114,11 @@ func _make_foot(foot_name: String, at: Vector3) -> MeshInstance3D:
 	var foot := MeshInstance3D.new()
 	foot.name = foot_name
 	var mesh := BoxMesh.new()
-	mesh.size = Vector3(0.22, 0.1, 0.34)
+	mesh.size = Vector3(0.40, 0.16, 0.62)
 	foot.mesh = mesh
 	foot.position = at
 	foot.material_override = foot_mat
+	foot.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	foot.visible = false
 	return foot
 
@@ -713,32 +1127,50 @@ func _make_hurt_mark() -> Node3D:
 	var mark := Node3D.new()
 	mark.name = "HurtMark"
 	mark.visible = false
-	var stake := MeshInstance3D.new()
-	var stake_mesh := BoxMesh.new()
-	stake_mesh.size = Vector3(0.18, 0.7, 0.18)
-	stake.mesh = stake_mesh
-	stake.position = Vector3(0.0, 2.15, 0.0)
-	stake.material_override = hurt_mark_mat
-	stake.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var stake := Node3D.new()
+	stake.name = "Stake"
 	mark.add_child(stake)
+	var post := MeshInstance3D.new()
+	var post_mesh := BoxMesh.new()
+	post_mesh.size = Vector3(0.16, 1.05, 0.16)
+	post.mesh = post_mesh
+	post.position = Vector3(0.0, 0.52, 0.0)
+	post.material_override = hurt_mark_mat
+	post.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	stake.add_child(post)
+	var flag := MeshInstance3D.new()
+	flag.name = "Flag"
+	var flag_mesh := BoxMesh.new()
+	flag_mesh.size = Vector3(0.62, 0.42, 0.08)
+	flag.mesh = flag_mesh
+	flag.position = Vector3(0.32, 0.98, 0.0)
+	flag.material_override = hurt_mark_mat
+	flag.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	stake.add_child(flag)
 	_status_ring(mark, 1.05, hurt_mark_mat)
 	return mark
 
 
-func _make_cold_mark() -> Node3D:
-	var mark := Node3D.new()
-	mark.name = "ColdMark"
-	mark.visible = false
-	var bar := MeshInstance3D.new()
-	var bar_mesh := BoxMesh.new()
-	bar_mesh.size = Vector3(1.8, 0.12, 0.42)
-	bar.mesh = bar_mesh
-	bar.position = Vector3(0.0, 0.08, 0.0)
-	bar.material_override = cold_mark_mat
-	bar.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mark.add_child(bar)
-	_status_ring(mark, 1.15, cold_mark_mat)
-	return mark
+func _make_arms() -> Node3D:
+	var arms := Node3D.new()
+	arms.name = "Arms"
+	arms.visible = false
+	arms.add_child(_make_arm("LeftUpper"))
+	arms.add_child(_make_arm("RightUpper"))
+	arms.add_child(_make_arm("Left"))
+	arms.add_child(_make_arm("Right"))
+	return arms
+
+
+func _make_arm(arm_name: String) -> MeshInstance3D:
+	var arm := MeshInstance3D.new()
+	arm.name = arm_name
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(0.38, 0.32, 0.70)
+	arm.mesh = mesh
+	arm.material_override = arm_mat
+	arm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return arm
 
 
 func _make_sleep_mat() -> MeshInstance3D:
@@ -884,6 +1316,10 @@ func _fit_job_label(label: Label3D, selected: bool) -> void:
 		# The starting three stand on one cell. Stagger the billboards or the
 		# job names land on each other.
 		lift += float(_int_of(body.get_meta("index", 0), 0)) * 1.45
+		var hurt := body.get_node_or_null("HurtMark")
+		if hurt != null and hurt.visible:
+			# The word used to cover the hurt stake. Keep it above the head.
+			lift += 0.7
 	label.position = Vector3(0.0, lift, 0.0)
 	label.visible = selected and ortho <= label_hide_above
 
@@ -1093,20 +1529,22 @@ func _make_person(index: int, generation: int) -> AnimatableBody3D:
 	blanket.visible = false
 	pose.add_child(blanket)
 
-	var shawl := MeshInstance3D.new()
-	shawl.name = "Shawl"
-	var shawl_mesh := BoxMesh.new()
-	shawl_mesh.size = Vector3(0.92, 0.14, 0.2)
-	shawl.mesh = shawl_mesh
-	shawl.position = Vector3(0.0, 1.34, 0.0)
-	shawl.material_override = cold_mat
-	shawl.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	shawl.visible = false
+	var shawl := _make_shawl()
 	pose.add_child(shawl)
+	pose.add_child(_make_arms())
+
+	var support := MeshInstance3D.new()
+	support.name = "SupportLeg"
+	var support_mesh := BoxMesh.new()
+	support_mesh.size = Vector3(0.28, 0.72, 0.28)
+	support.mesh = support_mesh
+	support.material_override = _flat(BODY_TIMBER)
+	support.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	support.visible = false
+	pose.add_child(support)
 
 	# Far marks stay on the body, not the pose, so a sleeper does not tip them.
 	body.add_child(_make_hurt_mark())
-	body.add_child(_make_cold_mark())
 	body.add_child(_make_sleep_mat())
 
 	var ring := Node3D.new()
@@ -1787,17 +2225,23 @@ func _make_materials() -> void:
 	cell_mat = _flat(Color(0.98, 0.86, 0.18), true)
 	focus_mat = _flat(Color(0.25, 0.58, 1.0), true)
 	# Injury is a cloth mark, not a splatter. Unshaded so the colour survives the key light.
-	wound_mat = _flat(Color(0.58, 0.16, 0.12), true)
-	infect_mat = _flat(Color(0.62, 0.70, 0.16), true)
-	sick_mat = _flat(Color(0.22, 0.30, 0.06), true)
-	wrap_mat = _flat(Color(0.94, 0.92, 0.86), true)
+	# Bright cloth red. A dark stain on timber disappears at 4 m.
+	wound_mat = _flat(Color(0.86, 0.12, 0.08), true)
+	infect_mat = _flat(Color(0.72, 0.78, 0.16), true)
+	sick_mat = _flat(Color(0.28, 0.36, 0.06), true)
+	wrap_mat = _flat(Color(0.96, 0.94, 0.88), true)
 	treated_mat = _flat(Color(0.95, 0.78, 0.20), true)
-	hurt_mark_mat = _flat(Color(0.62, 0.14, 0.06), true)
-	cold_mat = _flat(Color(0.70, 0.84, 0.96), true)
-	cold_mark_mat = _flat(Color(0.12, 0.34, 0.78), true)
+	hurt_mark_mat = _flat(Color(0.90, 0.14, 0.06), true)
+	cold_mat = _flat(Color(0.62, 0.80, 0.94), true)
+	# Lighter than the ice body so the wrap still reads as cloth on it.
+	# Not the selection blue, and not a ring.
+	# Frost white, not the ice body and not the selection blue. Thick enough
+	# that a hug still has a width at holding zoom.
+	arm_mat = _flat(Color(0.94, 0.98, 1.0), true)
 	sleep_roll_mat = _flat(Color(0.96, 0.93, 0.84), true)
 	blanket_mat = _flat(Color(0.18, 0.32, 0.55))
-	foot_mat = _flat(BODY_TIMBER)
+	# Not body timber. A body-coloured foot disappears in the rings.
+	foot_mat = _flat(Color(0.06, 0.04, 0.03), true)
 	item_mats = [
 		_flat(Color(0.84, 0.70, 0.28)),
 		_flat(Color(0.52, 0.32, 0.13)),
