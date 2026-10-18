@@ -1,6 +1,6 @@
 ; Latchsoil — Godot project. The sim is Rust; this project only presents it.
-; Milestone 0 keeps the tree minimal: a smoke scene that loads the GDExtension,
-; ticks the sim once, prints the tick, and quits.
+; Milestone 1a: the blockout holding is the main scene. The smoke scene and the
+; 1a harness are run by path from the check scripts, not from here.
 
 config_version=5
 
@@ -8,4 +8,4 @@ config_version=5
 
 config/name="Latchsoil"
 config/features=PackedStringArray("4.7")
-run/main_scene="res://scenes/smoke.tscn"
+run/main_scene="res://scenes/main.tscn"

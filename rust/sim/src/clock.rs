@@ -48,6 +48,16 @@ impl Clock {
         Self { tick: 0 }
     }
 
+    /// A clock already at `tick`. Used when a save is loaded.
+    pub fn from_tick(tick: u64) -> Self {
+        Self { tick }
+    }
+
+    /// Tick within the current day, in `0..TICKS_PER_DAY`.
+    pub fn tick_of_day(self) -> u64 {
+        self.tick % TICKS_PER_DAY
+    }
+
     /// Move the clock forward by `n` ticks.
     ///
     /// Panics if the tick counter would overflow `u64`. That is a bug, not a

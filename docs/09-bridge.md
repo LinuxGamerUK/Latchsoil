@@ -125,10 +125,10 @@ Malformed means a non-finite coordinate, an unknown discriminant, or an `ItemId`
 The smoke scene loads the extension, instances the one `SimHost`, calls `step` once, prints one stdout line, and quits with code 0. The line is the tick number and the state hash, and nothing else:
 
 ```
-tick 1 hash 0123456789abcdef
+latchsoil: tick 1 hash 0123456789abcdef
 ```
 
-The tick is decimal. The hash is 16 lowercase hex digits, zero-padded. A fresh sim is tick 0. One `step` makes it tick 1. The scene prints what `tick` and `state_hash` return. It does not format its own hash.
+The `latchsoil: ` prefix is part of the line: the check scripts grep for it, so the sim's line cannot be confused with engine chatter. The tick is decimal. The hash is 16 lowercase hex digits, zero-padded. A fresh sim is tick 0. One `step` makes it tick 1. The scene prints what `tick` and `state_hash` return. It does not format its own hash.
 
 A load failure exits non-zero and does not print that line. Loader text on stderr is allowed. The exit code is the check. `cargo test` in `latchsoil-sim` never needs this scene. It calls the same command enum, the same id rules, and the same hash.
 
@@ -141,3 +141,25 @@ Factions are not on this contract. No relation number, no war goal, and no treat
 Combat resolution is not on this contract. `Draft` stores the bool. `Attack` stores the target when both ids are live, and does not write a path. Neither applies a hit, a wound, or a death. Those rules arrive with the milestone that names them.
 
 Save migration, past the version check, is not on this contract. An unknown `save_version` fails the load. It does not rewrite fields. The snapshot grows when a later milestone adds state. New fields are appended. Existing discriminants stay where they are.
+
+## Milestone 1a — what the rules implement
+
+This section says what the rules do in milestone 1a, so the tests and the scene agree on one world. It narrows the contract above; it does not extend it.
+
+**The acre.** A new game lays a 32 m by 32 m acre with the survey peg at its centre, three Harth standing beside the peg, and six resource nodes. The acre is the whole path grid: 1 m cells, 32 by 32, cell origin at the floor of each axis. The same seed puts the same cast and the same nodes in the same places, because they come from the sim's own RNG stream in a fixed order. There are no obstacles yet: a point inside the acre is reachable and a point outside it is `no path`. Obstacles, terrain and the wider map arrive with the milestone that names them.
+
+**The cast.** Three people, all Harth, all starting at 1.0 hunger, 1.0 thirst, 1.0 health, carrying nothing. Ids are allocated in order: index 0, 1, 2, generation 1.
+
+**The nodes.** Two wood, two stone, one fiber, one water, at seed-chosen cells at least 4 m from the peg and 2 m apart. `remaining`: wood 40, stone 30, fiber 50, water 100. `yield_item` is the item gathering adds to carried goods, so a wood node yields the wood item.
+
+**Needs.** Hunger, thirst and health are `f32` in 0.0 to 1.0, where 1.0 is full. Hunger falls by 1/60 per tick, so a full person is hungry in about 1.7 days at 1x. Thirst falls by 1/90 per tick. Health is untouched while both are above 0.0, and falls by 1/1200 per tick while either is at 0.0. Eating restores 0.35 hunger and 0.15 thirst and consumes one carried grain.
+
+**Refusal thresholds**, each beside the test that names it: work is refused below 0.35 hunger with `hungry`, below 0.30 health with `wounded`, and between tick 5760 and 7200 of a day with `night` (the last 20 percent of the day is the night range). If more than one applies, the earliest in the `FailureReason` order wins.
+
+**Movement and work.** A person walks 1.4 m per second, which is 0.14 m per tick, along the path the sim computed, and reaches a waypoint when it is within 0.1 m. Gathering takes one unit per 20 ticks and adds it to carried goods; a person carries at most 20 units. A node that runs out while gathering fails the order with `no material`. An `eat` order with no carried grain fails with `no material`. Work orders are the only ones refused at submit time; the rest are accepted and then fail in rules if they cannot finish.
+
+**The five reasons 1a can produce:** `hungry`, `no path`, `night`, `wounded`, `no material`. `no skill` and `afraid` have no rule yet, so no 1a test can produce them and nothing returns them.
+
+**Rules implemented:** `Move`, `Gather`, `Eat`. The other six commands are accepted, stored as the actor's current order, and carry out nothing yet; their rules arrive with the milestone that names them. `Place` therefore allocates nothing in 1a.
+
+**One owner is enough.** `attach`, `detach`, `snapshot` and the owner cap behave as described above, but `poll` returns a full snapshot every time, with `full` true and `removed` empty. Per-owner dirty sets arrive with the second consumer of the world state, and this file records the change when they do.
