@@ -233,6 +233,21 @@ impl SimHost {
         i64::from(self.sim.submit_attack(actor, actor_gen, target, target_gen))
     }
 
+    /// Queue a take from a stockpile. Same codes as the other submits.
+    /// The sim writes the reject line; this method does not.
+    #[func]
+    fn submit_take(
+        &mut self,
+        actor_index: i64,
+        actor_gen: i64,
+        item_id: i64,
+        from_index: i64,
+        from_gen: i64,
+    ) -> i64 {
+        self.sim
+            .submit_take(actor_index, actor_gen, item_id, from_index, from_gen)
+    }
+
     /// Force a full copy. An unknown owner gets error 2 and empty arrays.
     #[func]
     fn snapshot(&mut self, owner: i64) -> VarDictionary {

@@ -1,11 +1,11 @@
-//! Sim state for milestone 1a: the acre, the queue, and Move / Gather / Eat.
+//! Sim state: the acre, the queue, and the milestone 1b orders.
 //!
 //! A command submitted while `tick()` is N is queued. `step` and `frame` apply
 //! that queue at the start of tick N+1, in submission order, then run one tick
 //! of rules. One rejection does not stop the batch. The queue is not saved and
 //! is not hashed. A successful `new_game` or load clears it.
 
-use crate::catalog::{self, item_known, recipe_known, Catalog, ITEM_GRAIN};
+use crate::catalog::{self, item_known, recipe_known, Catalog, ITEM_GRAIN, ITEM_MEAL, ITEM_WATER};
 use crate::clock::Clock;
 use crate::command::{
     BuildingKind, Command, FailureReason, ItemId, JobKind, RecipeId, MALFORMED, QUEUED, QUEUE_FULL,
@@ -15,17 +15,22 @@ use crate::ids::{EntityAllocator, EntityId, EntityKind};
 use crate::path::{self, advance_along};
 use crate::rng::SplitMix64;
 use crate::rules::{
-    dist, night_at, BESIDE_PEG, CARRY_CAP, EAT_HUNGER_RESTORE, EAT_THIRST_RESTORE,
-    FIBER_REMAINING, GATHER_TICKS_PER_UNIT, HEALTH_PER_TICK, HEALTH_REFUSAL, HUNGER_PER_TICK,
-    HUNGER_REFUSAL, NODE_MIN_APART, NODE_MIN_FROM_PEG, OWNER_CAP, PEG_X, PEG_Y, QUEUE_CAP,
-    STARTING_GRAIN, STONE_REMAINING, THIRST_PER_TICK, WALK_METERS_PER_TICK, WATER_REMAINING,
+    dist, night_at, BESIDE_PEG, BUILD_TICKS, CARRY_CAP, EAT_HUNGER_RESTORE, EAT_THIRST_RESTORE,
+    FIBER_REMAINING, GATHER_TICKS_PER_UNIT, HAUL_TICKS_PER_UNIT, HEALTH_PER_TICK, HEALTH_REFUSAL,
+    HUNGER_PER_TICK, HUNGER_REFUSAL, MEAL_HUNGER_RESTORE, MEAL_THIRST_RESTORE, NODE_MIN_APART,
+    NODE_MIN_FROM_PEG, OWNER_CAP, PEG_X, PEG_Y, QUEUE_CAP, STARTING_GRAIN, STATION_RANGE_M,
+    STOCKPILE_CAPACITY, STONE_REMAINING, TAKE_TICKS_PER_UNIT, THIRST_PER_TICK,
+    WALK_METERS_PER_TICK, WATER_HUNGER_RESTORE, WATER_REMAINING, WATER_THIRST_RESTORE,
     WAYPOINT_REACH_METERS, WOOD_REMAINING,
 };
 use crate::snapshot::{BuildingView, NodeView, PersonView, Rejections, Snapshot};
 use serde::{Deserialize, Serialize};
 
 /// Save format this crate writes and will load without a migration.
-pub const SAVE_VERSION: u32 = 1;
+///
+/// Version 1 is the milestone 1a acre. Nothing shipped, so it is refused rather
+/// than migrated.
+pub const SAVE_VERSION: u32 = 2;
 
 /// One running simulation.
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +76,8 @@ pub(crate) struct Building {
     kind: BuildingKind,
     x: f32,
     y: f32,
+    progress: u32,
+    contents: Vec<(ItemId, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -343,6 +350,33 @@ impl SimState {
         })
     }
 
+    /// Queue a take. Same codes as the other submits: 0 queued, 1 malformed,
+    /// 2 stale, 3 queue full. An id that does not fit in `u32` is `(0, 0)`,
+    /// which is never live. An item id that does not fit is not in the table.
+    pub fn submit_take(
+        &mut self,
+        actor_index: i64,
+        actor_gen: i64,
+        item_id: i64,
+        from_index: i64,
+        from_gen: i64,
+    ) -> i64 {
+        let (actor_index, actor_gen) = narrow_id(actor_index, actor_gen);
+        let (from_index, from_gen) = narrow_id(from_index, from_gen);
+        let item_id = u32::try_from(item_id).unwrap_or(u32::MAX);
+        i64::from(self.submit(Command::Take {
+            actor: EntityId {
+                index: actor_index,
+                generation: actor_gen,
+            },
+            item: ItemId(item_id),
+            from: EntityId {
+                index: from_index,
+                generation: from_gen,
+            },
+        }))
+    }
+
     /// Assign an owner id, starting at 1. The ninth live owner returns 0.
     pub fn attach(&mut self) -> u32 {
         if self.owners.len() >= OWNER_CAP {
@@ -585,15 +619,7 @@ impl SimState {
                 person.gather_ticks = 0;
                 person.failure = None;
             }
-            Command::Haul { to, .. } => {
-                let person = &mut self.people[pi];
-                person.order = Some(cmd);
-                person.path.clear();
-                person.dest = None;
-                person.target = Some(to);
-                person.gather_ticks = 0;
-                person.failure = None;
-            }
+            Command::Haul { to, .. } => self.begin_walk_order(pi, cmd, to),
             Command::Work { .. } => {
                 let person = &mut self.people[pi];
                 person.order = Some(cmd);
@@ -603,12 +629,30 @@ impl SimState {
                 person.gather_ticks = 0;
                 person.failure = None;
             }
-            Command::Place { at, .. } => {
+            Command::Place { building, at, .. } => {
+                if let Some(reason) = self.place_refusal(pi, at) {
+                    fail(&mut self.people[pi], reason);
+                    return;
+                }
+                let id = self
+                    .alloc
+                    .allocate(EntityKind::Building)
+                    .expect("a place fits in the id space");
+                self.buildings.push(Building {
+                    id,
+                    kind: building,
+                    x: at[0],
+                    y: at[1],
+                    progress: 0,
+                    contents: Vec::new(),
+                });
+                let from = [self.people[pi].x, self.people[pi].y];
+                let path = path::path_to(from, at).unwrap_or_default();
                 let person = &mut self.people[pi];
                 person.order = Some(cmd);
-                person.path.clear();
+                person.path = path;
                 person.dest = Some(at);
-                person.target = None;
+                person.target = Some(id);
                 person.gather_ticks = 0;
                 person.failure = None;
             }
@@ -640,7 +684,52 @@ impl SimState {
                 person.gather_ticks = 0;
                 person.failure = None;
             }
+            Command::Take { from, .. } => self.begin_walk_order(pi, cmd, from),
         }
+    }
+
+    /// Walk to a building, then the rules move goods. Haul and Take share this.
+    fn begin_walk_order(&mut self, pi: usize, cmd: Command, target: EntityId) {
+        let from = [self.people[pi].x, self.people[pi].y];
+        let dest = self
+            .buildings
+            .iter()
+            .find(|b| b.id == target)
+            .map(|b| [b.x, b.y]);
+        let path = dest
+            .and_then(|to| path::path_to(from, to))
+            .unwrap_or_default();
+        let person = &mut self.people[pi];
+        person.order = Some(cmd);
+        person.path = path;
+        person.dest = dest;
+        person.target = Some(target);
+        person.gather_ticks = 0;
+        person.failure = None;
+    }
+
+    /// A place that cannot become a building. Outside the acre is unreachable.
+    /// The peg's cell and a cell that already holds a building are not build
+    /// sites; the contract's only placement failure string is `no path`.
+    fn place_refusal(&self, pi: usize, at: [f32; 2]) -> Option<FailureReason> {
+        let Some(cell) = path::cell_of(at[0], at[1]) else {
+            return Some(FailureReason::NoPath);
+        };
+        if cell == (PEG_X as i32, PEG_Y as i32) {
+            return Some(FailureReason::NoPath);
+        }
+        if self
+            .buildings
+            .iter()
+            .any(|building| path::cell_of(building.x, building.y) == Some(cell))
+        {
+            return Some(FailureReason::NoPath);
+        }
+        let from = [self.people[pi].x, self.people[pi].y];
+        if path::path_to(from, at).is_none() {
+            return Some(FailureReason::NoPath);
+        }
+        None
     }
 
     fn run_rules(&mut self) {
@@ -661,7 +750,11 @@ impl SimState {
             Command::Move { to, .. } => self.tick_move(index, to),
             Command::Gather { node, .. } => self.tick_gather(index, node),
             Command::Eat { item, .. } => self.tick_eat(index, item),
-            _ => {}
+            Command::Place { .. } => self.tick_place(index),
+            Command::Haul { item, to, .. } => self.tick_haul(index, item, to),
+            Command::Take { item, from, .. } => self.tick_take(index, item, from),
+            Command::Craft { recipe, .. } => self.tick_craft(index, recipe),
+            Command::Work { .. } | Command::Draft { .. } | Command::Attack { .. } => {}
         }
     }
 
@@ -738,15 +831,193 @@ impl SimState {
     }
 
     fn tick_eat(&mut self, index: usize, item: ItemId) {
-        let person = &mut self.people[index];
-        if item != ITEM_GRAIN || count_of(&person.carried, ITEM_GRAIN) == 0 {
-            fail(person, FailureReason::NoMaterial);
+        let Some((hunger, thirst)) = eat_restore(item) else {
+            fail(&mut self.people[index], FailureReason::NoMaterial);
+            return;
+        };
+        if count_of(&self.people[index].carried, item) == 0 {
+            fail(&mut self.people[index], FailureReason::NoMaterial);
             return;
         }
-        take_carried(&mut person.carried, ITEM_GRAIN, 1);
-        person.hunger = (person.hunger + EAT_HUNGER_RESTORE).min(1.0);
-        person.thirst = (person.thirst + EAT_THIRST_RESTORE).min(1.0);
+        let person = &mut self.people[index];
+        take_carried(&mut person.carried, item, 1);
+        person.hunger = (person.hunger + hunger).min(1.0);
+        person.thirst = (person.thirst + thirst).min(1.0);
         complete(person);
+    }
+
+    fn tick_place(&mut self, index: usize) {
+        let Some(target) = self.people[index].target else {
+            fail(&mut self.people[index], FailureReason::NoPath);
+            return;
+        };
+        let Some(bi) = self.buildings.iter().position(|b| b.id == target) else {
+            fail(&mut self.people[index], FailureReason::NoPath);
+            return;
+        };
+        if self.buildings[bi].progress >= BUILD_TICKS {
+            complete(&mut self.people[index]);
+            return;
+        }
+        let site = [self.buildings[bi].x, self.buildings[bi].y];
+        if dist(self.people[index].pos(), site) > STATION_RANGE_M {
+            if self.people[index].path.is_empty() {
+                fail(&mut self.people[index], FailureReason::NoPath);
+                return;
+            }
+            let person = &mut self.people[index];
+            let mut pos = person.pos();
+            advance_along(&mut pos, &mut person.path, WALK_METERS_PER_TICK);
+            person.x = pos[0];
+            person.y = pos[1];
+            if dist(person.pos(), site) > STATION_RANGE_M {
+                return;
+            }
+            person.path.clear();
+        }
+        self.buildings[bi].progress += 1;
+        if self.buildings[bi].progress >= BUILD_TICKS {
+            complete(&mut self.people[index]);
+        }
+    }
+
+    fn tick_haul(&mut self, index: usize, item: ItemId, to: EntityId) {
+        if count_of(&self.people[index].carried, item) == 0 {
+            fail(&mut self.people[index], FailureReason::NoMaterial);
+            return;
+        }
+        let Some(bi) = self.stockpile_index(to) else {
+            fail(&mut self.people[index], FailureReason::NoStation);
+            return;
+        };
+        if total_carried(&self.buildings[bi].contents) >= STOCKPILE_CAPACITY {
+            complete(&mut self.people[index]);
+            return;
+        }
+        if !self.arrived(index, bi) {
+            return;
+        }
+        self.people[index].gather_ticks += 1;
+        if self.people[index].gather_ticks < HAUL_TICKS_PER_UNIT {
+            return;
+        }
+        self.people[index].gather_ticks = 0;
+        take_carried(&mut self.people[index].carried, item, 1);
+        add_carried(&mut self.buildings[bi].contents, item, 1);
+        let emptied = count_of(&self.people[index].carried, item) == 0;
+        let full = total_carried(&self.buildings[bi].contents) >= STOCKPILE_CAPACITY;
+        if emptied || full {
+            complete(&mut self.people[index]);
+        }
+    }
+
+    fn tick_take(&mut self, index: usize, item: ItemId, from: EntityId) {
+        let Some(bi) = self.stockpile_index(from) else {
+            fail(&mut self.people[index], FailureReason::NoStation);
+            return;
+        };
+        if count_of(&self.buildings[bi].contents, item) == 0 {
+            fail(&mut self.people[index], FailureReason::NoMaterial);
+            return;
+        }
+        if total_carried(&self.people[index].carried) >= CARRY_CAP {
+            complete(&mut self.people[index]);
+            return;
+        }
+        if !self.arrived(index, bi) {
+            return;
+        }
+        self.people[index].gather_ticks += 1;
+        if self.people[index].gather_ticks < TAKE_TICKS_PER_UNIT {
+            return;
+        }
+        self.people[index].gather_ticks = 0;
+        take_carried(&mut self.buildings[bi].contents, item, 1);
+        add_carried(&mut self.people[index].carried, item, 1);
+        let emptied = count_of(&self.buildings[bi].contents, item) == 0;
+        let capped = total_carried(&self.people[index].carried) >= CARRY_CAP;
+        if emptied || capped {
+            complete(&mut self.people[index]);
+        }
+    }
+
+    fn tick_craft(&mut self, index: usize, recipe_id: RecipeId) {
+        let Some(recipe) = catalog::recipe_def(recipe_id) else {
+            fail(&mut self.people[index], FailureReason::NoMaterial);
+            return;
+        };
+        if self.people[index].gather_ticks == 0 {
+            if let Some(reason) = self.craft_block(index, recipe) {
+                fail(&mut self.people[index], reason);
+                return;
+            }
+        }
+        self.people[index].gather_ticks += 1;
+        if self.people[index].gather_ticks < recipe.ticks {
+            return;
+        }
+        for (item, count) in recipe.inputs {
+            take_carried(&mut self.people[index].carried, *item, *count);
+        }
+        add_carried(&mut self.people[index].carried, recipe.output, 1);
+        complete(&mut self.people[index]);
+    }
+
+    /// Earliest failure wins: a missing input or tool is `no material`, and only
+    /// then does a missing station report `no station`.
+    fn craft_block(&self, index: usize, recipe: &catalog::RecipeDef) -> Option<FailureReason> {
+        let carried = &self.people[index].carried;
+        let missing_input = recipe
+            .inputs
+            .iter()
+            .any(|(item, count)| count_of(carried, *item) < *count);
+        let missing_tool = recipe.tool.is_some_and(|tool| count_of(carried, tool) == 0);
+        if missing_input || missing_tool {
+            return Some(FailureReason::NoMaterial);
+        }
+        if recipe
+            .station
+            .is_some_and(|kind| !self.station_ready(index, kind))
+        {
+            return Some(FailureReason::NoStation);
+        }
+        None
+    }
+
+    fn station_ready(&self, index: usize, kind: BuildingKind) -> bool {
+        let pos = self.people[index].pos();
+        self.buildings.iter().any(|building| {
+            building.kind == kind
+                && building.progress >= BUILD_TICKS
+                && dist(pos, [building.x, building.y]) <= STATION_RANGE_M
+        })
+    }
+
+    /// A finished stockpile. An unfinished one does not hold goods.
+    fn stockpile_index(&self, id: EntityId) -> Option<usize> {
+        self.buildings.iter().position(|building| {
+            building.id == id
+                && building.kind == BuildingKind::Stockpile
+                && building.progress >= BUILD_TICKS
+        })
+    }
+
+    /// Walk toward building `bi`. `true` once stood on it.
+    fn arrived(&mut self, index: usize, bi: usize) -> bool {
+        let dest = [self.buildings[bi].x, self.buildings[bi].y];
+        if !self.people[index].path.is_empty() {
+            let person = &mut self.people[index];
+            let mut pos = person.pos();
+            advance_along(&mut pos, &mut person.path, WALK_METERS_PER_TICK);
+            person.x = pos[0];
+            person.y = pos[1];
+            return false;
+        }
+        if dist(self.people[index].pos(), dest) > WAYPOINT_REACH_METERS {
+            fail(&mut self.people[index], FailureReason::NoPath);
+            return false;
+        }
+        true
     }
 
     fn pull(&mut self, owner: u32) -> Snapshot {
@@ -826,6 +1097,26 @@ const ITEM_STONE_YIELD: ItemId = catalog::ITEM_STONE;
 const ITEM_FIBER_YIELD: ItemId = catalog::ITEM_FIBER;
 const ITEM_WATER_YIELD: ItemId = catalog::ITEM_WATER;
 
+fn eat_restore(item: ItemId) -> Option<(f32, f32)> {
+    if item == ITEM_GRAIN {
+        Some((EAT_HUNGER_RESTORE, EAT_THIRST_RESTORE))
+    } else if item == ITEM_MEAL {
+        Some((MEAL_HUNGER_RESTORE, MEAL_THIRST_RESTORE))
+    } else if item == ITEM_WATER {
+        Some((WATER_HUNGER_RESTORE, WATER_THIRST_RESTORE))
+    } else {
+        None
+    }
+}
+
+/// An id that does not fit in `u32` cannot be live. `(0, 0)` is always stale.
+fn narrow_id(index: i64, generation: i64) -> (u32, u32) {
+    match (u32::try_from(index), u32::try_from(generation)) {
+        (Ok(index), Ok(generation)) => (index, generation),
+        _ => (0, 0),
+    }
+}
+
 fn node_cell_ok(x: i32, y: i32, placed: &[[f32; 2]]) -> bool {
     let pos = [x as f32 + 0.5, y as f32 + 0.5];
     if dist(pos, [PEG_X, PEG_Y]) < NODE_MIN_FROM_PEG {
@@ -846,7 +1137,9 @@ fn coords_finite(cmd: Command) -> bool {
 
 fn items_known(cmd: Command) -> bool {
     match cmd {
-        Command::Eat { item, .. } | Command::Haul { item, .. } => item_known(item),
+        Command::Eat { item, .. } | Command::Haul { item, .. } | Command::Take { item, .. } => {
+            item_known(item)
+        }
         Command::Craft { recipe, .. } => recipe_known(recipe),
         _ => true,
     }
@@ -862,6 +1155,7 @@ fn referenced_ids(cmd: Command) -> Vec<EntityId> {
         | Command::Draft { actor, .. } => vec![actor],
         Command::Gather { actor, node } => vec![actor, node],
         Command::Haul { actor, to, .. } => vec![actor, to],
+        Command::Take { actor, from, .. } => vec![actor, from],
         Command::Attack { actor, target } => vec![actor, target],
     }
 }
@@ -873,10 +1167,17 @@ fn kinds_match(sim: &SimState, cmd: Command) -> bool {
     }
     match cmd {
         Command::Gather { node, .. } => sim.alloc.kind(node) == Some(EntityKind::Node),
-        Command::Haul { to, .. } => sim.alloc.kind(to) == Some(EntityKind::Building),
+        Command::Haul { to, .. } => is_stockpile(sim, to),
+        Command::Take { from, .. } => is_stockpile(sim, from),
         Command::Attack { target, .. } => sim.alloc.is_live(target),
         _ => true,
     }
+}
+
+fn is_stockpile(sim: &SimState, id: EntityId) -> bool {
+    sim.buildings
+        .iter()
+        .any(|building| building.id == id && building.kind == BuildingKind::Stockpile)
 }
 
 fn decay_needs(person: &mut Person) {
@@ -969,6 +1270,7 @@ impl Person {
 fn person_view(person: &Person) -> PersonView {
     let job = match person.order {
         Some(Command::Work { job, .. }) => job.discriminant(),
+        Some(Command::Place { .. }) => JobKind::Build.discriminant(),
         _ => -1,
     };
     let (failure, failure_text) = match person.failure {
@@ -1012,12 +1314,23 @@ fn person_view(person: &Person) -> PersonView {
 }
 
 fn building_view(building: &Building) -> BuildingView {
+    let contents = if building.kind == BuildingKind::Stockpile {
+        building
+            .contents
+            .iter()
+            .map(|(item, count)| [item.0, *count])
+            .collect()
+    } else {
+        Vec::new()
+    };
     BuildingView {
         index: building.id.index,
         generation: building.id.generation,
         kind: building.kind.discriminant(),
         x: building.x,
         y: building.y,
+        progress: building.progress,
+        contents,
     }
 }
 
@@ -1165,6 +1478,12 @@ fn hash_order(hash: &mut Fnv64, order: Option<Command>) {
             hash.write_u32(target.index);
             hash.write_u32(target.generation);
         }
+        Some(Command::Take { item, from, .. }) => {
+            hash.write_u8(10);
+            hash.write_u32(item.0);
+            hash.write_u32(from.index);
+            hash.write_u32(from.generation);
+        }
     }
 }
 
@@ -1174,6 +1493,12 @@ fn hash_building(hash: &mut Fnv64, building: &Building) {
     hash.write_u8(building.kind.discriminant() as u8);
     hash.write_f32(building.x);
     hash.write_f32(building.y);
+    hash.write_u32(building.progress);
+    hash.write_u64(building.contents.len() as u64);
+    for (item, count) in &building.contents {
+        hash.write_u32(item.0);
+        hash.write_u32(*count);
+    }
 }
 
 fn hash_node(hash: &mut Fnv64, node: &Node) {
@@ -1248,6 +1573,16 @@ pub(crate) struct SavedSlot {
     pub remaining: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yield_item: Option<u32>,
+    /// Build ticks spent. Omitted when 0, which is also the load default.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub progress: u32,
+    /// Stockpile contents, `[item_id, count]`, sorted by item id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contents: Vec<[u32; 2]>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1262,6 +1597,7 @@ pub(crate) enum SavedOrder {
     Craft { recipe: u32 },
     Draft { drafted: bool },
     Attack { target: [u32; 2] },
+    Take { item: u32, from: [u32; 2] },
 }
 
 impl SavedSlot {
@@ -1271,12 +1607,14 @@ impl SavedSlot {
             generation: view.generation,
             live: view.live,
             retired: view.retired,
-            kind: view.kind.map(|kind| match kind {
-                EntityKind::Person => "person",
-                EntityKind::Building => "building",
-                EntityKind::Node => "node",
-            })
-            .map(str::to_string),
+            kind: view
+                .kind
+                .map(|kind| match kind {
+                    EntityKind::Person => "person",
+                    EntityKind::Building => "building",
+                    EntityKind::Node => "node",
+                })
+                .map(str::to_string),
             x: 0.0,
             y: 0.0,
             hunger: 0.0,
@@ -1293,6 +1631,8 @@ impl SavedSlot {
             building: None,
             remaining: None,
             yield_item: None,
+            progress: 0,
+            contents: Vec::new(),
         };
         let id = EntityId {
             index: view.index,
@@ -1320,6 +1660,12 @@ impl SavedSlot {
             slot.x = building.x;
             slot.y = building.y;
             slot.building = Some(building.kind.discriminant() as u8);
+            slot.progress = building.progress;
+            slot.contents = building
+                .contents
+                .iter()
+                .map(|(item, count)| [item.0, *count])
+                .collect();
         } else if let Some(node) = sim.nodes.iter().find(|n| n.id == id) {
             slot.x = node.x;
             slot.y = node.y;
@@ -1353,6 +1699,10 @@ impl SavedOrder {
             Command::Draft { drafted, .. } => Self::Draft { drafted },
             Command::Attack { target, .. } => Self::Attack {
                 target: [target.index, target.generation],
+            },
+            Command::Take { item, from, .. } => Self::Take {
+                item: item.0,
+                from: [from.index, from.generation],
             },
         }
     }
@@ -1401,6 +1751,14 @@ impl SavedOrder {
                     generation: target[1],
                 },
             },
+            Self::Take { item, from } => Command::Take {
+                actor,
+                item: ItemId(item),
+                from: EntityId {
+                    index: from[0],
+                    generation: from[1],
+                },
+            },
         })
     }
 }
@@ -1443,9 +1801,9 @@ pub(crate) fn world_from_saved(saved: SavedWorld) -> Result<LoadedWorld, &'stati
             Some("person") => {
                 let failure = match slot.failure {
                     None => None,
-                    Some(disc) => Some(
-                        FailureReason::from_discriminant(disc).ok_or("unknown failure")?,
-                    ),
+                    Some(disc) => {
+                        Some(FailureReason::from_discriminant(disc).ok_or("unknown failure")?)
+                    }
                 };
                 let order = match slot.order {
                     None => None,
@@ -1483,11 +1841,20 @@ pub(crate) fn world_from_saved(saved: SavedWorld) -> Result<LoadedWorld, &'stati
                     slot.building.ok_or("building has no kind")?,
                 ))
                 .ok_or("unknown building")?;
+                let mut contents = Vec::new();
+                for pair in slot.contents {
+                    if pair[1] == 0 {
+                        return Err("stockpile count is 0");
+                    }
+                    add_carried(&mut contents, ItemId(pair[0]), pair[1]);
+                }
                 buildings.push(Building {
                     id,
                     kind,
                     x: slot.x,
                     y: slot.y,
+                    progress: slot.progress,
+                    contents,
                 });
             }
             Some("node") => nodes.push(Node {

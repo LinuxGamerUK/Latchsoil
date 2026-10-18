@@ -35,6 +35,10 @@ pub struct BuildingView {
     pub kind: u32,
     pub x: f32,
     pub y: f32,
+    /// Work ticks spent. Finished at `BUILD_TICKS`.
+    pub progress: u32,
+    /// `[item_id, count]` pairs, sorted by item id. Empty for a non-stockpile.
+    pub contents: Vec<[u32; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

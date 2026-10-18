@@ -7,6 +7,11 @@ const ACRE_M := 32.0
 const LAYER_GROUND := 1
 const LAYER_PERSON := 2
 const LAYER_NODE := 4
+const LAYER_BUILDING := 8
+const BUILD_TICKS := 60
+const KIND_CAMPFIRE := 0
+const KIND_LEAN_TO := 1
+const KIND_STOCKPILE := 2
 const BODY_TIMBER := Color(0.34, 0.20, 0.11)
 const BODY_DRAFTED := Color(0.10, 0.09, 0.08)
 const JOB_NAMES: PackedStringArray = ["haul", "build", "farm", "craft", "heal", "cook", "guard"]
@@ -41,6 +46,11 @@ var _warned := {}
 var people_root: Node3D
 var nodes_root: Node3D
 var path_root: Node3D
+var buildings_root: Node3D
+
+var buildings: Dictionary = {}
+var building_focus := ""
+var ghost: Node3D
 
 var sash_mat: StandardMaterial3D
 var scrap_mat: StandardMaterial3D
@@ -54,6 +64,16 @@ var fibre_mat: StandardMaterial3D
 var water_mat: StandardMaterial3D
 var unknown_mat: StandardMaterial3D
 var path_materials: Array = []
+var item_mats: Array = []
+var timber_mat: StandardMaterial3D
+var ceramic_mat: StandardMaterial3D
+var soot_mat: StandardMaterial3D
+var site_mat: StandardMaterial3D
+var flame_mat: StandardMaterial3D
+var canvas_mat: StandardMaterial3D
+var ghost_mat: StandardMaterial3D
+var cell_mat: StandardMaterial3D
+var focus_mat: StandardMaterial3D
 
 var shape_wood: BoxShape3D
 var shape_stone: SphereShape3D
@@ -79,6 +99,9 @@ func _ready() -> void:
 	path_root = Node3D.new()
 	path_root.name = "Paths"
 	add_child(path_root)
+	buildings_root = Node3D.new()
+	buildings_root.name = "Buildings"
+	add_child(buildings_root)
 
 
 func _process(_delta: float) -> void:
@@ -109,6 +132,8 @@ func apply_snapshot(snap: Dictionary, selection: Array, rejects: Dictionary) -> 
 	var sel_keys := _selection_keys(selection)
 	_sync_people(people_rows, full, sel_keys, rejects, tick)
 	_sync_nodes(node_rows, full)
+	if snap.has("buildings") and snap.get("buildings") is Array:
+		_sync_buildings(snap.get("buildings"), full)
 	_sync_removed(snap.get("removed", []))
 	_sync_orders(people_rows, full)
 
@@ -119,6 +144,41 @@ func pick_person(camera: Camera3D, mouse: Vector2) -> Dictionary:
 
 func pick_node(camera: Camera3D, mouse: Vector2) -> Dictionary:
 	return _entity_from_hit(_raycast(camera, mouse, LAYER_NODE), "node")
+
+
+func pick_building(camera: Camera3D, mouse: Vector2) -> Dictionary:
+	return _entity_from_hit(_raycast(camera, mouse, LAYER_BUILDING), "building")
+
+
+# Half away from zero, the same rule the sim applies before a place lands.
+func snap_axis(value: float) -> float:
+	if value >= 0.0:
+		return floorf(value + 0.5)
+	return -floorf(-value + 0.5)
+
+
+func snap_point(point: Vector3) -> Vector3:
+	return Vector3(snap_axis(point.x), 0.0, snap_axis(point.z))
+
+
+func show_ghost(kind: int, at: Vector3) -> void:
+	if ghost == null or _int_of(ghost.get_meta("kind", -1), -1) != kind:
+		_rebuild_ghost(kind)
+	ghost.position = at
+	ghost.visible = true
+
+
+func hide_ghost() -> void:
+	if ghost != null:
+		ghost.visible = false
+
+
+func set_building_focus(index: int, generation: int) -> void:
+	building_focus = _id_key(index, generation)
+
+
+func clear_building_focus() -> void:
+	building_focus = ""
 
 
 func pick_ground(camera: Camera3D, mouse: Vector2) -> Variant:
@@ -184,6 +244,35 @@ func _sync_nodes(rows: Array, full: bool) -> void:
 		body.force_update_transform()
 	if full:
 		_drop_missing(nodes, seen)
+
+
+func _sync_buildings(rows: Array, full: bool) -> void:
+	var seen := {}
+	for row in rows:
+		if not row is Dictionary:
+			continue
+		if not row.has("x") or not row.has("y"):
+			_warn_once("building_xy", "latchsoil: a building row has no x,y")
+			continue
+		var index := _int_of(row.get("index", -1), -1)
+		var generation := _int_of(row.get("generation", -1), -1)
+		var key := _id_key(index, generation)
+		seen[key] = true
+		var body: AnimatableBody3D = buildings.get(key)
+		if body == null:
+			body = _make_building(index, generation)
+			buildings[key] = body
+			buildings_root.add_child(body)
+		body.position = Vector3(_float_of(row.get("x"), 0.0), 0.0, _float_of(row.get("y"), 0.0))
+		_apply_building(body, row)
+		var focus := body.get_node_or_null("Focus") as Node3D
+		if focus != null:
+			focus.visible = key == building_focus
+		body.force_update_transform()
+		if body.is_inside_tree():
+			PhysicsServer3D.body_set_state(body.get_rid(), PhysicsServer3D.BODY_STATE_TRANSFORM, body.global_transform)
+	if full:
+		_drop_missing(buildings, seen)
 
 
 func _sync_removed(removed) -> void:
@@ -395,7 +484,13 @@ func _fit_job_label(label: Label3D, selected: bool) -> void:
 	label.pixel_size = LABEL_REF_METERS * fit / float(LABEL_FONT)
 	label.font_size = LABEL_FONT
 	label.outline_size = 12
-	label.position = Vector3(0.0, LABEL_LIFT, 0.0)
+	var lift := LABEL_LIFT
+	var body := label.get_parent()
+	if body != null:
+		# The starting three stand on one cell. Stagger the billboards or the
+		# job names land on each other.
+		lift += float(_int_of(body.get_meta("index", 0), 0)) * 1.45
+	label.position = Vector3(0.0, lift, 0.0)
 	label.visible = selected and ortho <= label_hide_above
 
 
@@ -641,6 +736,281 @@ func _make_node(index: int, generation: int) -> AnimatableBody3D:
 	visual.name = "Visual"
 	body.add_child(visual)
 	return body
+
+
+func _make_building(index: int, generation: int) -> AnimatableBody3D:
+	var body := AnimatableBody3D.new()
+	body.name = "Building_%d_%d" % [index, generation]
+	body.collision_layer = LAYER_BUILDING
+	body.collision_mask = 0
+	body.sync_to_physics = false
+	body.set_meta("entity_kind", "building")
+	body.set_meta("index", index)
+	body.set_meta("generation", generation)
+	body.set_meta("kind_drawn", -1)
+	var col := CollisionShape3D.new()
+	col.name = "Collision"
+	var shape := BoxShape3D.new()
+	shape.size = Vector3(1.5, 1.6, 1.5)
+	col.shape = shape
+	col.position = Vector3(0.0, 0.8, 0.0)
+	body.add_child(col)
+	var visual := Node3D.new()
+	visual.name = "Visual"
+	body.add_child(visual)
+	var focus := Node3D.new()
+	focus.name = "Focus"
+	focus.visible = false
+	_cell_outline(focus, focus_mat, 1.25, 0.08)
+	body.add_child(focus)
+	return body
+
+
+func _apply_building(body: AnimatableBody3D, row: Dictionary) -> void:
+	var kind := _int_of(row.get("kind", -1), -1)
+	var visual := body.get_node("Visual") as Node3D
+	if _int_of(body.get_meta("kind_drawn", -1), -1) != kind:
+		body.set_meta("kind_drawn", kind)
+		for child in visual.get_children():
+			child.free()
+		_build_kind(visual, kind)
+	var progress := _int_of(row.get("progress", 0), 0)
+	var done := progress >= BUILD_TICKS
+	var site := visual.get_node_or_null("Site") as Node3D
+	var structure := visual.get_node_or_null("Structure") as Node3D
+	if site != null:
+		site.visible = not done
+	if structure != null:
+		structure.visible = progress > 0 or done
+		if done:
+			structure.scale = Vector3.ONE
+		else:
+			var risen := clampf(float(progress) / float(BUILD_TICKS), 0.2, 1.0)
+			structure.scale = Vector3(1.0, risen, 1.0)
+		var finish := structure.get_node_or_null("Finish") as Node3D
+		if finish != null:
+			finish.visible = done
+		var partial := structure.get_node_or_null("Partial") as Node3D
+		if partial != null:
+			partial.visible = not done
+	if kind == KIND_STOCKPILE:
+		var goods := structure.get_node_or_null("Finish/Goods") if structure != null else null
+		if goods is Node3D:
+			_fill_crates(goods, row.get("contents", []) if done else [])
+
+
+func _build_kind(visual: Node3D, kind: int) -> void:
+	var site := Node3D.new()
+	site.name = "Site"
+	visual.add_child(site)
+	_add_work_site(site, kind)
+	var structure := Node3D.new()
+	structure.name = "Structure"
+	visual.add_child(structure)
+	var finish := Node3D.new()
+	finish.name = "Finish"
+	structure.add_child(finish)
+	match kind:
+		KIND_CAMPFIRE:
+			_add_campfire(structure, finish)
+		KIND_LEAN_TO:
+			_add_lean_to(structure, finish)
+		KIND_STOCKPILE:
+			_add_stockpile(structure, finish)
+		_:
+			_box(structure, Vector3(1.2, 1.0, 1.2), Vector3(0.0, 0.5, 0.0), unknown_mat)
+
+
+func _add_work_site(site: Node3D, kind: int) -> void:
+	# Open timber frame plus a material pile. The frame is the under-construction
+	# read at both zooms; the finished mesh hides it.
+	_box(site, Vector3(1.7, 0.06, 1.7), Vector3(0.0, 0.05, 0.0), site_mat)
+	var post := Vector3(0.28, 1.25, 0.28)
+	var half := 0.78
+	for corner in [Vector3(-half, 0.62, -half), Vector3(half, 0.62, -half), Vector3(-half, 0.62, half), Vector3(half, 0.62, half)]:
+		_box(site, post, corner, timber_mat)
+	_box(site, Vector3(1.56, 0.16, 0.16), Vector3(0.0, 1.18, -half), timber_mat)
+	_box(site, Vector3(1.56, 0.16, 0.16), Vector3(0.0, 1.18, half), timber_mat)
+	_box(site, Vector3(0.16, 0.16, 1.56), Vector3(-half, 1.18, 0.0), timber_mat)
+	_box(site, Vector3(0.16, 0.16, 1.56), Vector3(half, 1.18, 0.0), timber_mat)
+	_box(site, Vector3(0.7, 0.28, 0.36), Vector3(-0.1, 0.18, 0.05), timber_mat)
+	if kind == KIND_CAMPFIRE:
+		_sphere(site, 0.22, Vector3(0.28, 0.18, 0.12), stone_mat)
+	elif kind == KIND_STOCKPILE:
+		_box(site, Vector3(0.9, 0.04, 0.9), Vector3(0.0, 0.1, 0.0), canvas_mat)
+
+
+func _add_campfire(structure: Node3D, finish: Node3D) -> void:
+	var ring := CylinderMesh.new()
+	ring.top_radius = 0.62
+	ring.bottom_radius = 0.7
+	ring.height = 0.28
+	_mesh(structure, ring, Vector3(0.0, 0.16, 0.0), stone_mat)
+	var inner := CylinderMesh.new()
+	inner.top_radius = 0.28
+	inner.bottom_radius = 0.32
+	inner.height = 0.12
+	_mesh(structure, inner, Vector3(0.0, 0.18, 0.0), soot_mat)
+	var log := CylinderMesh.new()
+	log.top_radius = 0.08
+	log.bottom_radius = 0.09
+	log.height = 0.85
+	var log_a := _mesh(finish, log, Vector3(0.0, 0.32, 0.0), timber_mat)
+	log_a.rotation_degrees = Vector3(0.0, 28.0, 90.0)
+	var log_b := _mesh(finish, log, Vector3(0.0, 0.40, 0.0), timber_mat)
+	log_b.rotation_degrees = Vector3(78.0, 0.0, 0.0)
+	var flame := SphereMesh.new()
+	flame.radius = 0.34
+	flame.height = 0.95
+	_mesh(finish, flame, Vector3(0.0, 0.78, 0.0), flame_mat)
+
+
+func _add_lean_to(structure: Node3D, finish: Node3D) -> void:
+	# Tall back, open front, roof falling toward -Z. The wedge still explains
+	# the door and the work stump after each 90 degree camera snap.
+	_box(structure, Vector3(2.05, 1.65, 0.2), Vector3(0.0, 0.84, 0.82), timber_mat)
+	_box(structure, Vector3(0.22, 1.65, 0.22), Vector3(-0.95, 0.84, 0.82), timber_mat)
+	_box(structure, Vector3(0.22, 1.65, 0.22), Vector3(0.95, 0.84, 0.82), timber_mat)
+	_box(structure, Vector3(0.22, 0.72, 0.22), Vector3(-0.95, 0.36, -0.72), timber_mat)
+	_box(structure, Vector3(0.22, 0.72, 0.22), Vector3(0.95, 0.36, -0.72), timber_mat)
+	var partial := Node3D.new()
+	partial.name = "Partial"
+	structure.add_child(partial)
+	_box(partial, Vector3(1.6, 0.12, 0.32), Vector3(0.0, 0.95, 0.2), ceramic_mat)
+	_box(partial, Vector3(1.6, 0.12, 0.32), Vector3(0.0, 0.55, -0.15), ceramic_mat)
+	var roof := _box(finish, Vector3(2.35, 0.16, 2.15), Vector3(0.0, 1.42, 0.05), ceramic_mat)
+	roof.rotation_degrees = Vector3(-34.0, 0.0, 0.0)
+	_box(finish, Vector3(0.26, 0.1, 0.16), Vector3(0.45, 1.95, 0.55), scrap_mat)
+	_box(finish, Vector3(0.42, 0.32, 0.42), Vector3(0.1, 0.16, -1.45), timber_mat)
+
+
+func _add_stockpile(structure: Node3D, finish: Node3D) -> void:
+	_box(structure, Vector3(1.8, 0.08, 1.8), Vector3(0.0, 0.06, 0.0), canvas_mat)
+	var post := Vector3(0.16, 0.42, 0.16)
+	for corner in [Vector3(-0.78, 0.24, -0.78), Vector3(0.78, 0.24, -0.78), Vector3(-0.78, 0.24, 0.78), Vector3(0.78, 0.24, 0.78)]:
+		_box(structure, post, corner, timber_mat)
+	var goods := Node3D.new()
+	goods.name = "Goods"
+	finish.add_child(goods)
+
+
+func _fill_crates(goods: Node3D, contents) -> void:
+	var sig := str(contents)
+	if str(goods.get_meta("sig", "")) == sig and goods.get_child_count() > 0:
+		return
+	if str(goods.get_meta("sig", "")) == sig and goods.get_child_count() == 0 and sig in ["[]", ""]:
+		return
+	goods.set_meta("sig", sig)
+	for child in goods.get_children():
+		child.free()
+	var pairs := _good_pairs(contents)
+	var n := 0
+	for pair in pairs:
+		var copies := mini(int(pair["count"]), 3)
+		for _i in copies:
+			if n >= 8:
+				return
+			var col := n % 4
+			var layer := int(float(n) / 4.0)
+			var at := Vector3(-0.58 + float(col) * 0.40, 0.28 + float(layer) * 0.40, 0.0)
+			_box(goods, Vector3(0.36, 0.36, 0.36), at, _item_mat(int(pair["id"])))
+			n += 1
+
+
+func _good_pairs(value) -> Array:
+	var out: Array = []
+	if not value is Array or value.is_empty():
+		return out
+	if value[0] is Array or value[0] is PackedInt32Array:
+		for pair in value:
+			if (pair is Array or pair is PackedInt32Array) and pair.size() >= 2:
+				var count := _int_of(pair[1], 0)
+				if count > 0:
+					out.append({"id": _int_of(pair[0], -1), "count": count})
+		return out
+	var i := 0
+	while i + 1 < value.size():
+		var count := _int_of(value[i + 1], 0)
+		if count > 0:
+			out.append({"id": _int_of(value[i], -1), "count": count})
+		i += 2
+	return out
+
+
+func _item_mat(item_id: int) -> Material:
+	if item_id >= 0 and item_id < item_mats.size():
+		return item_mats[item_id]
+	return unknown_mat
+
+
+func _rebuild_ghost(kind: int) -> void:
+	if ghost != null:
+		var old := ghost
+		ghost = null
+		old.visible = false
+		old.free()
+	ghost = Node3D.new()
+	ghost.name = "Ghost"
+	ghost.set_meta("kind", kind)
+	ghost.visible = false
+	add_child(ghost)
+	_cell_outline(ghost, cell_mat, 1.0, 0.1)
+	var preview := Node3D.new()
+	preview.name = "Preview"
+	ghost.add_child(preview)
+	_build_kind(preview, kind)
+	var site := preview.get_node_or_null("Site") as Node3D
+	if site != null:
+		site.visible = false
+	var structure := preview.get_node_or_null("Structure") as Node3D
+	if structure != null:
+		structure.visible = true
+		structure.scale = Vector3.ONE
+		var finish := structure.get_node_or_null("Finish") as Node3D
+		if finish != null:
+			finish.visible = true
+		var partial := structure.get_node_or_null("Partial") as Node3D
+		if partial != null:
+			partial.visible = false
+	_tint_ghost(preview)
+
+
+func _tint_ghost(node: Node) -> void:
+	if node is MeshInstance3D:
+		node.material_override = ghost_mat
+		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	for child in node.get_children():
+		_tint_ghost(child)
+
+
+func _cell_outline(parent: Node3D, mat: Material, span: float, thick: float) -> void:
+	var half := span * 0.5
+	_box(parent, Vector3(span, 0.06, thick), Vector3(0.0, 0.08, -half), mat).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_box(parent, Vector3(span, 0.06, thick), Vector3(0.0, 0.08, half), mat).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_box(parent, Vector3(thick, 0.06, span), Vector3(-half, 0.08, 0.0), mat).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_box(parent, Vector3(thick, 0.06, span), Vector3(half, 0.08, 0.0), mat).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+
+func _box(parent: Node3D, size: Vector3, at: Vector3, mat: Material) -> MeshInstance3D:
+	var mesh := BoxMesh.new()
+	mesh.size = size
+	return _mesh(parent, mesh, at, mat)
+
+
+func _sphere(parent: Node3D, radius: float, at: Vector3, mat: Material) -> MeshInstance3D:
+	var mesh := SphereMesh.new()
+	mesh.radius = radius
+	mesh.height = radius * 2.0
+	return _mesh(parent, mesh, at, mat)
+
+
+func _mesh(parent: Node3D, mesh: Mesh, at: Vector3, mat: Material) -> MeshInstance3D:
+	var node := MeshInstance3D.new()
+	node.mesh = mesh
+	node.position = at
+	node.material_override = mat
+	parent.add_child(node)
+	return node
 
 
 func _apply_node_visual(body: AnimatableBody3D, kind: String) -> void:
@@ -911,6 +1281,7 @@ func _drop_id(index: int, generation: int) -> void:
 	var key := _id_key(index, generation)
 	_drop_one(people, key)
 	_drop_one(nodes, key)
+	_drop_one(buildings, key)
 	_hide_order(key)
 
 
@@ -960,6 +1331,26 @@ func _make_materials() -> void:
 	fibre_mat = _flat(Color(0.28, 0.56, 0.20))
 	water_mat = _flat(Color(0.20, 0.48, 0.80))
 	unknown_mat = _flat(Color(0.48, 0.42, 0.36))
+	timber_mat = _flat(Color(0.36, 0.20, 0.10))
+	ceramic_mat = _flat(Color(0.74, 0.40, 0.20))
+	soot_mat = _flat(Color(0.16, 0.13, 0.11))
+	site_mat = _flat(Color(0.93, 0.62, 0.16), true)
+	flame_mat = _flat(Color(1.0, 0.52, 0.08), true)
+	canvas_mat = _flat(Color(0.78, 0.64, 0.38))
+	ghost_mat = _flat(Color(0.98, 0.82, 0.32, 0.48), true)
+	ghost_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	cell_mat = _flat(Color(0.98, 0.86, 0.18), true)
+	focus_mat = _flat(Color(0.25, 0.58, 1.0), true)
+	item_mats = [
+		_flat(Color(0.84, 0.70, 0.28)),
+		_flat(Color(0.52, 0.32, 0.13)),
+		_flat(Color(0.62, 0.60, 0.56)),
+		_flat(Color(0.30, 0.58, 0.22)),
+		_flat(Color(0.22, 0.48, 0.78)),
+		_flat(Color(0.74, 0.76, 0.80)),
+		_flat(Color(0.80, 0.42, 0.16)),
+		_flat(Color(0.92, 0.90, 0.84)),
+	]
 
 
 func _make_shapes() -> void:

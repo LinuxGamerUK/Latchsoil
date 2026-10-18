@@ -1,4 +1,4 @@
-//! Milestone 1a constants. Each threshold sits next to the test that names it.
+//! Sim constants. Each threshold sits next to the test that names it.
 //!
 //! Needs fall at a rate measured in days, because that is how the play calendar
 //! is described: a day is 12 minutes at 1x. An earlier revision said "hunger
@@ -70,6 +70,42 @@ pub const EAT_HUNGER_RESTORE: f32 = 0.35;
 
 /// Thirst restored by eating one grain, before the 0.0–1.0 clamp.
 pub const EAT_THIRST_RESTORE: f32 = 0.15;
+
+/// Hunger restored by eating one meal. Cooking pays about twice over grain.
+pub const MEAL_HUNGER_RESTORE: f32 = 0.75;
+
+/// Thirst restored by eating one meal.
+pub const MEAL_THIRST_RESTORE: f32 = 0.30;
+
+/// Hunger restored by drinking one water. Water is thirst only.
+pub const WATER_HUNGER_RESTORE: f32 = 0.0;
+
+/// Thirst restored by drinking one water.
+pub const WATER_THIRST_RESTORE: f32 = 0.50;
+
+/// Ticks of work, standing within [`STATION_RANGE_M`], until a building is finished.
+pub const BUILD_TICKS: u32 = 60;
+
+/// Ticks stood at a stockpile per unit hauled in.
+pub const HAUL_TICKS_PER_UNIT: u32 = 5;
+
+/// Ticks stood at a stockpile per unit taken out.
+pub const TAKE_TICKS_PER_UNIT: u32 = 3;
+
+/// A finished building is a station for an actor within this distance.
+pub const STATION_RANGE_M: f32 = 2.0;
+
+/// Units a stockpile holds, across every item.
+pub const STOCKPILE_CAPACITY: u32 = 200;
+
+/// Ticks to craft a knife. No station.
+pub const RECIPE_KNIFE_TICKS: u32 = 60;
+
+/// Ticks to craft a meal. Needs a finished campfire.
+pub const RECIPE_MEAL_TICKS: u32 = 30;
+
+/// Ticks to craft a bandage. Needs a finished lean-to and a carried knife.
+pub const RECIPE_BANDAGE_TICKS: u32 = 40;
 
 /// A node cell centre must be at least this far from the peg.
 pub const NODE_MIN_FROM_PEG: f32 = 4.0;

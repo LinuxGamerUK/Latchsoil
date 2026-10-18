@@ -7,6 +7,17 @@
 *.translation
 export_presets.cfg.bak
 
+# Godot script UIDs: the engine writes these locally and regenerates them.
+*.uid
+
+# Generated assets. godot/assets/*.glb is produced by scripts/asset-spike.sh from
+# scripts/gen_<name>.py, so the mesh is output, not source. Re-run the script.
+godot/assets/
+
+# Review frames: they are kept beside the project note in the vault, and the repo
+# carries the script that reproduces them instead.
+renders/
+
 # Compiled extension libraries: built into godot/bin/ and linked from rust/target
 *.so
 *.dylib

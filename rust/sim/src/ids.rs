@@ -113,9 +113,9 @@ impl EntityAllocator {
 
     /// True only when this exact occupant of the slot is still allocated.
     pub fn is_live(&self, id: EntityId) -> bool {
-        self.slots.get(id.index as usize).is_some_and(|slot| {
-            slot.live && !slot.retired && slot.generation == id.generation
-        })
+        self.slots
+            .get(id.index as usize)
+            .is_some_and(|slot| slot.live && !slot.retired && slot.generation == id.generation)
     }
 
     pub fn kind(&self, id: EntityId) -> Option<EntityKind> {
@@ -128,7 +128,9 @@ impl EntityAllocator {
     }
 
     pub fn generation(&self, id: EntityId) -> Option<u32> {
-        self.slots.get(id.index as usize).map(|slot| slot.generation)
+        self.slots
+            .get(id.index as usize)
+            .map(|slot| slot.generation)
     }
 
     pub(crate) fn slot_count(&self) -> usize {
@@ -196,10 +198,7 @@ impl EntityAllocator {
                 return Err("a reusable slot is missing from the free list");
             }
         }
-        Ok(Self {
-            slots: built,
-            free,
-        })
+        Ok(Self { slots: built, free })
     }
 }
 
@@ -317,6 +316,9 @@ mod tests {
         let json = serde_json::to_string(&alloc).unwrap();
         let mut loaded: EntityAllocator = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded, alloc);
-        assert_eq!(loaded.allocate(EntityKind::Building).unwrap(), alloc.allocate(EntityKind::Building).unwrap());
+        assert_eq!(
+            loaded.allocate(EntityKind::Building).unwrap(),
+            alloc.allocate(EntityKind::Building).unwrap()
+        );
     }
 }

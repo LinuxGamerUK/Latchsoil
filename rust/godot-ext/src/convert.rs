@@ -73,6 +73,8 @@ fn buildings_array(buildings: &[BuildingView]) -> VarArray {
         row.set("kind", i64::from(building.kind));
         row.set("x", f64::from(building.x));
         row.set("y", f64::from(building.y));
+        row.set("progress", i64::from(building.progress));
+        row.set("contents", &carried_array(&building.contents));
         array.push(&row.to_variant());
     }
     array

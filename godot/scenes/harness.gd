@@ -1,13 +1,21 @@
 extends Node
 
-# Milestone 1a headless acceptance. This scene is a probe, not a rule: it issues
-# orders through SimHost and reads the snapshot dictionary back. If the extension
-# is missing it quits 3, so a broken build cannot look green.
+# Headless acceptance. This scene is a probe, not a rule: it issues orders
+# through SimHost and reads the snapshot dictionary back. If the extension is
+# missing it quits 3, so a broken build cannot look green.
 #
-# Reasons this scene covers, by name: "no material" and "no path".
+# Milestone 1a is the default, so a missing 1b rule cannot fail that gate.
+# Milestone 1b runs only when the check script asks for it: LATCHSOIL_CHECK=1b,
+# or a user argument "1b" after --.
+#
+# Reasons 1a covers, by name: "no material" and "no path".
 # The other three reasons in the contract (hungry, wounded, night) are produced
 # directly in the sim crate's Rust tests, because a scene cannot set hunger.
 # Nothing here fakes those three.
+#
+# Reasons 1b covers, by name: "no station" and "no material".
+# The line is the snapshot's failure_text. This scene does not keep a second
+# wording and does not map a discriminant to a string of its own.
 
 const HOST_CLASS := "SimHost"
 const SEED := 7
@@ -25,6 +33,35 @@ const RATION := 4
 const MAX_MOVE_TICKS := 200
 const MAX_GATHER_TICKS := 800
 const MAX_FAIL_TICKS := 80
+# Milestone 1b contract numbers, held here rather than read from the sim.
+const BUILD_TICKS := 60
+const HAUL_TICKS_PER_UNIT := 5
+const TAKE_TICKS_PER_UNIT := 3
+const STATION_RANGE_M := 2.0
+const STOCKPILE_CAPACITY := 200
+const MEAL_TICKS := 30
+const KNIFE_TICKS := 60
+const BANDAGE_TICKS := 40
+const CAMPFIRE := 0
+const STOCKPILE := 2
+const RECIPE_KNIFE := 0
+const RECIPE_MEAL := 1
+const ITEM_GRAIN := 0
+const ITEM_WOOD := 1
+const ITEM_STONE := 2
+const ITEM_WATER := 4
+const ITEM_MEAL := 6
+const NO_STATION := 7
+const SAVE_VERSION_1B := 2
+# Walk across the acre, then the contract's own work time.
+const MAX_BUILD_TICKS := 400 + BUILD_TICKS
+const MAX_HAUL_TICKS := 400 + RATION * HAUL_TICKS_PER_UNIT
+const MAX_TAKE_TICKS := 200 + RATION * TAKE_TICKS_PER_UNIT
+const MAX_CRAFT_TICKS := 200 + MEAL_TICKS
+const METHODS_1B := [
+	"submit_place", "submit_craft", "submit_haul", "submit_take",
+	"save_json", "load_json",
+]
 const METHODS := [
 	"new_game", "submit_move", "submit_gather", "submit_eat",
 	"frame", "step", "tick", "state_hash",
@@ -58,6 +95,10 @@ func _ready() -> void:
 	owner_id = int(host.call("attach"))
 	if owner_id == 0:
 		fail("attach", "attach returned 0")
+		return
+
+	if harness_mode() == "1b":
+		run_milestone_1b()
 		return
 
 	run_cast()
@@ -641,7 +682,10 @@ func run_no_path() -> void:
 
 
 func wait_for_reason(person_index: int, reason: String, check: String) -> bool:
-	var expected_code := 1 if reason == "no path" else 2
+	var expected_code := reason_code(reason)
+	if expected_code < 0:
+		fail(check, "no discriminant for '%s'" % reason)
+		return false
 	for _i in MAX_FAIL_TICKS:
 		if drive_one(false) != 1:
 			fail(check, "step did not advance one tick")
@@ -787,3 +831,814 @@ func run_determinism() -> void:
 		fail("determinism", "seed %d and seed %d share state_hash %s" % [SEED, SEED + 1, first])
 		return
 	ok("determinism")
+
+
+func harness_mode() -> String:
+	if OS.get_environment("LATCHSOIL_CHECK") == "1b":
+		return "1b"
+	for arg in OS.get_cmdline_user_args():
+		if str(arg) == "1b":
+			return "1b"
+	return "1a"
+
+
+func reason_code(reason: String) -> int:
+	# Discriminants from the bridge contract, held here. Callers still read
+	# failure_text from the snapshot; this scene does not invent the line.
+	if reason == "hungry":
+		return 0
+	if reason == "no path":
+		return 1
+	if reason == "no material":
+		return 2
+	if reason == "no skill":
+		return 3
+	if reason == "afraid":
+		return 4
+	if reason == "night":
+		return 5
+	if reason == "wounded":
+		return 6
+	if reason == "no station":
+		return NO_STATION
+	return -1
+
+
+func run_milestone_1b() -> void:
+	# Surface the 1b methods name. Each check requires the one it calls, so a
+	# missing take does not hide a place failure.
+	var _surface := METHODS_1B
+	run_place()
+	if failed:
+		return
+	run_no_station()
+	if failed:
+		return
+	run_craft_material()
+	if failed:
+		return
+	run_craft_meal()
+	if failed:
+		return
+	run_stockpile()
+	if failed:
+		return
+	run_save()
+	if failed:
+		return
+	print("1b: ok")
+	cleanup()
+	get_tree().quit(0)
+
+
+func require_method(method_name: String, check: String) -> bool:
+	if method_exists(method_name):
+		return true
+	fail(check, "SimHost has no %s" % method_name)
+	return false
+
+
+func begin(check: String) -> bool:
+	host.call("new_game", SEED)
+	var s := snap()
+	if failed:
+		return false
+	var people: Array = s.get("people", [])
+	if people.size() < 1 or not infer_acre(people, s.get("nodes", [])):
+		fail(check, "cast is not inside a 32 m acre (%s)" % positions_text(s))
+		return false
+	return true
+
+
+func resolved_id(check: String, kind: String, row_name: String, expected: int) -> int:
+	var found := -1
+	if kind == "item":
+		found = catalog_id(row_name)
+	else:
+		found = recipe_id(row_name)
+	if found < 0:
+		return expected
+	if found != expected:
+		fail(check, "catalog %s '%s' is %d, contract says %d" % [kind, row_name, found, expected])
+		return -1
+	return found
+
+
+func recipe_id(recipe_name: String) -> int:
+	if not host.has_method("catalog") and not ClassDB.class_has_method(HOST_CLASS, "catalog"):
+		return -1
+	var cat = host.call("catalog")
+	if not (cat is Dictionary):
+		return -1
+	for recipe in cat.get("recipes", []):
+		if str(recipe.get("name", "")).to_lower() == recipe_name:
+			return int(recipe.get("id", -1))
+	return -1
+
+
+func cell_origin(point: Vector2) -> Vector2:
+	return Vector2(floor(point.x), floor(point.y))
+
+
+func peg_cell() -> Vector2:
+	return cell_origin(peg)
+
+
+func cell_is_taken(cell: Vector2, taken: Array) -> bool:
+	for point in taken:
+		if cell.distance_to(Vector2(point)) < 0.01:
+			return true
+	return false
+
+
+func occupied_cells(s: Dictionary) -> Array:
+	var taken: Array = [peg_cell()]
+	for building in s.get("buildings", []):
+		taken.append(cell_origin(Vector2(float(building.get("x", 0.0)), float(building.get("y", 0.0)))))
+	for node in s.get("nodes", []):
+		taken.append(cell_origin(Vector2(float(node.get("x", 0.0)), float(node.get("y", 0.0)))))
+	return taken
+
+
+func free_cell(origin: Vector2, taken: Array) -> Vector2:
+	# Far enough that the person is outside STATION_RANGE_M, so the first
+	# snapshot of a new building is the applying tick at progress 0.
+	var base := cell_origin(origin)
+	var offsets: Array[Vector2] = [
+		Vector2(4, 0), Vector2(-4, 0), Vector2(0, 4), Vector2(0, -4),
+		Vector2(4, 2), Vector2(-4, 2), Vector2(2, 4), Vector2(-2, 4),
+		Vector2(5, -1), Vector2(-5, 1), Vector2(1, -5), Vector2(-1, 5),
+		Vector2(6, 2), Vector2(-6, -2), Vector2(3, 5), Vector2(-3, -5),
+	]
+	for offset in offsets:
+		var cell: Vector2 = base + offset
+		if not in_acre(cell) or cell.distance_to(peg_cell()) < 0.01 or cell_is_taken(cell, taken):
+			continue
+		return cell
+	return Vector2(INF, INF)
+
+
+func building_by_index(s: Dictionary, index: int) -> Dictionary:
+	for building in s.get("buildings", []):
+		if int(building.get("index", -1)) == index:
+			return building
+	return {}
+
+
+func building_at(rows: Array, at: Vector2) -> Dictionary:
+	for building in rows:
+		var pos := Vector2(float(building.get("x", INF)), float(building.get("y", INF)))
+		if pos.distance_to(at) < 0.01:
+			return building
+	return {}
+
+
+func buildings_of_kind(s: Dictionary, kind: int) -> Array:
+	var found: Array = []
+	for building in s.get("buildings", []):
+		if int(building.get("kind", -1)) == kind:
+			found.append(building)
+	return found
+
+
+func store_count(building: Dictionary, item_id: int) -> int:
+	if not building.has("contents"):
+		return -1
+	return carried_count({"carried": building.get("contents", [])}, item_id)
+
+
+func inventory_sig(carried) -> String:
+	var bits: PackedStringArray = []
+	for item_id in [ITEM_GRAIN, ITEM_WOOD, ITEM_STONE, ITEM_WATER, ITEM_MEAL]:
+		var n := carried_count({"carried": carried}, item_id)
+		if n > 0:
+			bits.append("%d=%d" % [item_id, n])
+	if bits.is_empty():
+		return "-"
+	return ",".join(bits)
+
+
+func building_sig(s: Dictionary) -> String:
+	var bits: PackedStringArray = []
+	for building in s.get("buildings", []):
+		var contents := "missing"
+		if building.has("contents"):
+			contents = inventory_sig(building.get("contents", []))
+		bits.append("%s:%s:%s:%s:%s" % [
+			str(building.get("index", -1)),
+			str(building.get("generation", -1)),
+			str(building.get("kind", -1)),
+			str(building.get("progress", -1)),
+			contents,
+		])
+	return "|".join(bits)
+
+
+func node_by_yield(s: Dictionary, item_id: int) -> Dictionary:
+	for node in s.get("nodes", []):
+		if int(node.get("yield_item", -1)) == item_id:
+			return node
+	return {}
+
+
+func gather_one(check: String, item_name: String, item_id: int) -> bool:
+	var s := snap()
+	if failed:
+		return false
+	var node := node_by_yield(s, item_id)
+	if node.is_empty():
+		fail(check, "no %s node in the snapshot" % item_name)
+		return false
+	var person := person_by_index(s, 0)
+	if person.is_empty():
+		fail(check, "person 0 missing before gather")
+		return false
+	var before := carried_count(person, item_id)
+	var code = host.call(
+		"submit_gather", 0, int(person["generation"]),
+		int(node["index"]), int(node["generation"])
+	)
+	if code == null or int(code) != 0:
+		fail(check, "submit_gather %s returned %s" % [item_name, str(code)])
+		return false
+	for _i in MAX_GATHER_TICKS:
+		if drive_one(false) != 1:
+			fail(check, "step did not advance one tick")
+			return false
+		s = snap()
+		if failed:
+			return false
+		person = person_by_index(s, 0)
+		if carried_count(person, item_id) > before:
+			return true
+		var reason := failure_text_of(person)
+		if reason != "":
+			fail(check, "gather %s failed with '%s'" % [item_name, reason])
+			return false
+	fail(check, "no %s gathered within %d ticks" % [item_name, MAX_GATHER_TICKS])
+	return false
+
+
+func ensure_in_range(check: String, building: Dictionary) -> bool:
+	var at := Vector2(float(building.get("x", 0.0)), float(building.get("y", 0.0)))
+	var s := snap()
+	if failed:
+		return false
+	var person := person_by_index(s, 0)
+	var pos := Vector2(float(person.get("x", 0.0)), float(person.get("y", 0.0)))
+	if pos.distance_to(at) <= STATION_RANGE_M:
+		return true
+	var code = host.call("submit_move", 0, int(person["generation"]), at.x, at.y)
+	if code == null or int(code) != 0:
+		fail(check, "submit_move back to the station returned %s" % str(code))
+		return false
+	for _i in MAX_MOVE_TICKS:
+		if drive_one(false) != 1:
+			fail(check, "step did not advance one tick")
+			return false
+		s = snap()
+		if failed:
+			return false
+		person = person_by_index(s, 0)
+		pos = Vector2(float(person.get("x", 0.0)), float(person.get("y", 0.0)))
+		var reason := failure_text_of(person)
+		if reason != "":
+			fail(check, "walk back to the station failed with '%s'" % reason)
+			return false
+		if pos.distance_to(at) <= STATION_RANGE_M:
+			return true
+	fail(check, "person stayed %.2f m from the station" % pos.distance_to(at))
+	return false
+
+
+func finish_placed(check: String, kind: int, at: Vector2) -> Dictionary:
+	if not require_method("submit_place", check):
+		return {}
+	var before := snap()
+	if failed:
+		return {}
+	var person := person_by_index(before, 0)
+	if person.is_empty():
+		fail(check, "person 0 missing")
+		return {}
+	var before_count := buildings_of_kind(before, kind).size()
+	var code = host.call("submit_place", 0, int(person["generation"]), kind, at.x, at.y)
+	if code == null or int(code) != 0:
+		fail(check, "submit_place returned %s" % str(code))
+		return {}
+	var appeared := {}
+	var saw_zero := false
+	var saw_mid := false
+	var prev := -1
+	for _i in MAX_BUILD_TICKS:
+		if drive_one(false) != 1:
+			fail(check, "step did not advance one tick")
+			return {}
+		var s := snap()
+		if failed:
+			return {}
+		var rows := buildings_of_kind(s, kind)
+		if rows.size() <= before_count:
+			continue
+		appeared = building_at(rows, at)
+		if appeared.is_empty():
+			fail(check, "a building of kind %d appeared, but not at %s" % [kind, at])
+			return {}
+		if not appeared.has("progress"):
+			fail(check, "building snapshot has no progress (%s)" % str(appeared.keys()))
+			return {}
+		var progress := int(appeared["progress"])
+		if not saw_zero and not saw_mid and prev < 0 and progress != 0:
+			fail(check, "building appeared at progress %d, expected 0" % progress)
+			return {}
+		if progress == 0:
+			saw_zero = true
+		if progress > 0 and progress < BUILD_TICKS:
+			saw_mid = true
+		if progress > BUILD_TICKS:
+			fail(check, "progress %d exceeded BUILD_TICKS %d" % [progress, BUILD_TICKS])
+			return {}
+		if prev >= 0 and progress < prev:
+			fail(check, "progress fell %d -> %d" % [prev, progress])
+			return {}
+		prev = progress
+		if progress == BUILD_TICKS:
+			if not saw_zero:
+				fail(check, "progress reached %d without starting at 0" % BUILD_TICKS)
+				return {}
+			if not saw_mid:
+				fail(check, "progress jumped to %d without a value in between" % BUILD_TICKS)
+				return {}
+			return appeared
+	fail(check, "progress did not reach %d within %d ticks (last %d)" % [BUILD_TICKS, MAX_BUILD_TICKS, prev])
+	return {}
+
+
+func run_place() -> void:
+	if not begin("place"):
+		return
+	var s := snap()
+	if failed:
+		return
+	var person := person_by_index(s, 0)
+	var at := free_cell(Vector2(float(person["x"]), float(person["y"])), occupied_cells(s))
+	if not at.is_finite():
+		fail("place", "no free cell inside the acre")
+		return
+	var building := finish_placed("place", CAMPFIRE, at)
+	if failed or building.is_empty():
+		return
+	if int(building.get("kind", -1)) != CAMPFIRE:
+		fail("place", "kind %s, expected campfire %d" % [str(building.get("kind")), CAMPFIRE])
+		return
+	if int(building.get("progress", -1)) != BUILD_TICKS:
+		fail("place", "progress %s, expected %d" % [str(building.get("progress")), BUILD_TICKS])
+		return
+	ok("place")
+
+
+func run_no_station() -> void:
+	if not begin("no-station"):
+		return
+	if not require_method("submit_craft", "no-station"):
+		return
+	var water_id := resolved_id("no-station", "item", "water", ITEM_WATER)
+	var grain_id := resolved_id("no-station", "item", "grain", ITEM_GRAIN)
+	var recipe := resolved_id("no-station", "recipe", "meal", RECIPE_MEAL)
+	if failed or water_id < 0 or grain_id < 0 or recipe < 0:
+		return
+	if not gather_one("no-station", "water", water_id):
+		return
+	var s := snap()
+	if failed:
+		return
+	var person := person_by_index(s, 0)
+	var grain_before := carried_count(person, grain_id)
+	var water_before := carried_count(person, water_id)
+	if grain_before < 1 or water_before < 1:
+		fail("no-station", "inputs missing before the craft (grain %d water %d)" % [grain_before, water_before])
+		return
+	# No campfire. NoMaterial precedes NoStation, so the inputs have to be in
+	# hand or the sim is right to say no material instead.
+	var code = host.call("submit_craft", 0, int(person["generation"]), recipe)
+	if code == null or int(code) != 0:
+		fail("no-station", "submit_craft returned %s" % str(code))
+		return
+	if not wait_for_reason(0, "no station", "no-station"):
+		return
+	s = snap()
+	if failed:
+		return
+	person = person_by_index(s, 0)
+	# The line is the sim's. Do not substitute a local wording.
+	if failure_text_of(person) != "no station":
+		fail("no-station", "failure_text '%s', expected the sim string 'no station'" % failure_text_of(person))
+		return
+	if int(person.get("failure", -999)) != NO_STATION:
+		fail("no-station", "discriminant %s, expected %d" % [str(person.get("failure")), NO_STATION])
+		return
+	if carried_count(person, grain_id) != grain_before or carried_count(person, water_id) != water_before:
+		fail("no-station", "refusal consumed inputs")
+		return
+	ok("no-station")
+
+
+func run_craft_material() -> void:
+	if not begin("craft-material"):
+		return
+	if not require_method("submit_craft", "craft-material"):
+		return
+	var wood_id := resolved_id("craft-material", "item", "wood", ITEM_WOOD)
+	var stone_id := resolved_id("craft-material", "item", "stone", ITEM_STONE)
+	var recipe := resolved_id("craft-material", "recipe", "knife", RECIPE_KNIFE)
+	if failed or wood_id < 0 or stone_id < 0 or recipe < 0:
+		return
+	var s := snap()
+	if failed:
+		return
+	var person := person_by_index(s, 0)
+	if carried_count(person, wood_id) != 0 or carried_count(person, stone_id) != 0:
+		fail("craft-material", "person already carries a knife input (%s)" % str(person.get("carried")))
+		return
+	var tick_before := int(host.call("tick"))
+	var code = host.call("submit_craft", 0, int(person["generation"]), recipe)
+	if code == null or int(code) != 0:
+		fail("craft-material", "submit_craft returned %s" % str(code))
+		return
+	if not wait_for_reason(0, "no material", "craft-material"):
+		return
+	var elapsed := int(host.call("tick")) - tick_before
+	if elapsed >= KNIFE_TICKS:
+		fail("craft-material", "missing input failed after %d ticks; a knife takes %d and must fail when it starts" % [elapsed, KNIFE_TICKS])
+		return
+	s = snap()
+	if failed:
+		return
+	person = person_by_index(s, 0)
+	if failure_text_of(person) != "no material":
+		fail("craft-material", "failure_text '%s', expected 'no material'" % failure_text_of(person))
+		return
+	if carried_count(person, wood_id) != 0 or carried_count(person, stone_id) != 0:
+		fail("craft-material", "refusal changed carried goods %s" % str(person.get("carried")))
+		return
+	ok("craft-material")
+
+
+func run_craft_meal() -> void:
+	if not begin("craft-meal"):
+		return
+	if not require_method("submit_craft", "craft-meal"):
+		return
+	var water_id := resolved_id("craft-meal", "item", "water", ITEM_WATER)
+	var grain_id := resolved_id("craft-meal", "item", "grain", ITEM_GRAIN)
+	var recipe := resolved_id("craft-meal", "recipe", "meal", RECIPE_MEAL)
+	if failed or water_id < 0 or grain_id < 0 or recipe < 0:
+		return
+	if not gather_one("craft-meal", "water", water_id):
+		return
+	var s := snap()
+	if failed:
+		return
+	var person := person_by_index(s, 0)
+	var at := free_cell(Vector2(float(person["x"]), float(person["y"])), occupied_cells(s))
+	if not at.is_finite():
+		fail("craft-meal", "no free cell for the campfire")
+		return
+	var building := finish_placed("craft-meal", CAMPFIRE, at)
+	if failed or building.is_empty():
+		return
+	if not ensure_in_range("craft-meal", building):
+		return
+	s = snap()
+	if failed:
+		return
+	person = person_by_index(s, 0)
+	var grain_before := carried_count(person, grain_id)
+	var water_before := carried_count(person, water_id)
+	var meal_before := carried_count(person, ITEM_MEAL)
+	if grain_before < 1 or water_before < 1:
+		fail("craft-meal", "inputs missing beside the finished campfire (grain %d water %d)" % [grain_before, water_before])
+		return
+	var tick_before := int(host.call("tick"))
+	var code = host.call("submit_craft", 0, int(person["generation"]), recipe)
+	if code == null or int(code) != 0:
+		fail("craft-meal", "submit_craft returned %s" % str(code))
+		return
+	for _i in MAX_CRAFT_TICKS:
+		if drive_one(false) != 1:
+			fail("craft-meal", "step did not advance one tick")
+			return
+		s = snap()
+		if failed:
+			return
+		person = person_by_index(s, 0)
+		var reason := failure_text_of(person)
+		if reason != "":
+			fail("craft-meal", "craft failed with '%s'" % reason)
+			return
+		if carried_count(person, ITEM_MEAL) <= meal_before:
+			continue
+		var elapsed := int(host.call("tick")) - tick_before
+		if elapsed < MEAL_TICKS:
+			fail("craft-meal", "meal appeared after %d ticks, recipe takes %d" % [elapsed, MEAL_TICKS])
+			return
+		if carried_count(person, grain_id) != grain_before - 1 or carried_count(person, water_id) != water_before - 1:
+			fail("craft-meal", "meal did not consume one grain and one water (grain %d water %d)" % [carried_count(person, grain_id), carried_count(person, water_id)])
+			return
+		ok("craft-meal")
+		return
+	fail("craft-meal", "meal did not appear within %d ticks" % MAX_CRAFT_TICKS)
+
+
+func haul_grain_into(check: String, building: Dictionary, grain_id: int, start: int) -> bool:
+	if not require_method("submit_haul", check):
+		return false
+	if not building.has("contents"):
+		fail(check, "stockpile snapshot has no contents (%s)" % str(building.keys()))
+		return false
+	if store_count(building, grain_id) != 0:
+		fail(check, "new stockpile already holds %d grain" % store_count(building, grain_id))
+		return false
+	var s := snap()
+	if failed:
+		return false
+	var person := person_by_index(s, 0)
+	if carried_count(person, grain_id) != start:
+		fail(check, "carried grain changed before haul (%d, expected %d)" % [carried_count(person, grain_id), start])
+		return false
+	var code = host.call(
+		"submit_haul", 0, int(person["generation"]), grain_id,
+		int(building["index"]), int(building["generation"])
+	)
+	if code == null or int(code) != 0:
+		fail(check, "submit_haul returned %s" % str(code))
+		return false
+	var start_tick := int(host.call("tick"))
+	var saw_rise := false
+	var index := int(building["index"])
+	var last_store := 0
+	var last_carried := start
+	for _i in MAX_HAUL_TICKS:
+		if drive_one(false) != 1:
+			fail(check, "step did not advance one tick")
+			return false
+		s = snap()
+		if failed:
+			return false
+		person = person_by_index(s, 0)
+		var current := building_by_index(s, index)
+		if person.is_empty() or current.is_empty():
+			fail(check, "person or stockpile disappeared during haul")
+			return false
+		if not current.has("contents"):
+			fail(check, "stockpile lost contents (%s)" % str(current.keys()))
+			return false
+		var store_now := store_count(current, grain_id)
+		var carried_now := carried_count(person, grain_id)
+		if store_now > STOCKPILE_CAPACITY:
+			fail(check, "stockpile holds %d, capacity is %d" % [store_now, STOCKPILE_CAPACITY])
+			return false
+		if store_now > last_store:
+			saw_rise = true
+		var reason := failure_text_of(person)
+		if reason != "":
+			fail(check, "haul failed with '%s'" % reason)
+			return false
+		last_store = store_now
+		last_carried = carried_now
+		if store_now == start and carried_now == 0:
+			var elapsed := int(host.call("tick")) - start_tick
+			if not saw_rise:
+				fail(check, "store reached %d without contents rising" % start)
+				return false
+			if elapsed < start * HAUL_TICKS_PER_UNIT:
+				fail(check, "haul of %d finished in %d ticks, contract is %d per unit" % [start, elapsed, HAUL_TICKS_PER_UNIT])
+				return false
+			return true
+	fail(check, "haul incomplete after %d ticks (store %d, carried %d)" % [MAX_HAUL_TICKS, last_store, last_carried])
+	return false
+
+
+func run_stockpile() -> void:
+	if not begin("haul"):
+		return
+	var grain_id := resolved_id("haul", "item", "grain", ITEM_GRAIN)
+	if failed or grain_id < 0:
+		return
+	var s := snap()
+	if failed:
+		return
+	var person := person_by_index(s, 0)
+	var start := carried_count(person, grain_id)
+	if start != RATION:
+		fail("haul", "person 0 carries %d grain, expected %d" % [start, RATION])
+		return
+	var at := free_cell(Vector2(float(person["x"]), float(person["y"])), occupied_cells(s))
+	if not at.is_finite():
+		fail("haul", "no free cell for the stockpile")
+		return
+	var building := finish_placed("haul", STOCKPILE, at)
+	if failed or building.is_empty():
+		return
+	if not haul_grain_into("haul", building, grain_id, start):
+		return
+	ok("haul")
+
+	if not require_method("submit_take", "take"):
+		return
+	s = snap()
+	if failed:
+		return
+	person = person_by_index(s, 0)
+	building = building_by_index(s, int(building["index"]))
+	if building.is_empty() or store_count(building, grain_id) != start:
+		fail("take", "store does not hold the hauled grain")
+		return
+	var code = host.call(
+		"submit_take", 0, int(person["generation"]), grain_id,
+		int(building["index"]), int(building["generation"])
+	)
+	if code == null or int(code) != 0:
+		fail("take", "submit_take returned %s" % str(code))
+		return
+	var start_tick := int(host.call("tick"))
+	var saw_fall := false
+	var saw_hand := false
+	var index := int(building["index"])
+	var last_store := start
+	var last_carried := 0
+	var took := false
+	for _i in MAX_TAKE_TICKS:
+		if drive_one(false) != 1:
+			fail("take", "step did not advance one tick")
+			return
+		s = snap()
+		if failed:
+			return
+		person = person_by_index(s, 0)
+		var current := building_by_index(s, index)
+		if person.is_empty() or current.is_empty():
+			fail("take", "person or stockpile disappeared")
+			return
+		var store_now := store_count(current, grain_id)
+		var carried_now := carried_count(person, grain_id)
+		if store_now < last_store:
+			saw_fall = true
+		if carried_now > 0:
+			saw_hand = true
+		var reason := failure_text_of(person)
+		if reason != "":
+			fail("take", "take failed with '%s'" % reason)
+			return
+		last_store = store_now
+		last_carried = carried_now
+		if store_now == 0 and carried_now == start:
+			var elapsed := int(host.call("tick")) - start_tick
+			if not saw_fall or not saw_hand:
+				fail("take", "goods did not move back out (store %d carried %d)" % [store_now, carried_now])
+				return
+			if elapsed < start * TAKE_TICKS_PER_UNIT:
+				fail("take", "take of %d finished in %d ticks, contract is %d per unit" % [start, elapsed, TAKE_TICKS_PER_UNIT])
+				return
+			took = true
+			break
+	if not took:
+		fail("take", "take incomplete after %d ticks (store %d, carried %d)" % [MAX_TAKE_TICKS, last_store, last_carried])
+		return
+	ok("take")
+
+	s = snap()
+	if failed:
+		return
+	person = person_by_index(s, 0)
+	building = building_by_index(s, index)
+	if store_count(building, grain_id) != 0:
+		fail("take-empty", "store still holds %d grain" % store_count(building, grain_id))
+		return
+	var carried_before := carried_count(person, grain_id)
+	code = host.call(
+		"submit_take", 0, int(person["generation"]), grain_id,
+		int(building["index"]), int(building["generation"])
+	)
+	if code == null or int(code) != 0:
+		fail("take-empty", "submit_take returned %s" % str(code))
+		return
+	if not wait_for_reason(0, "no material", "take-empty"):
+		return
+	s = snap()
+	if failed:
+		return
+	person = person_by_index(s, 0)
+	building = building_by_index(s, index)
+	if failure_text_of(person) != "no material":
+		fail("take-empty", "failure_text '%s', expected 'no material'" % failure_text_of(person))
+		return
+	if carried_count(person, grain_id) != carried_before or store_count(building, grain_id) != 0:
+		fail("take-empty", "refusal changed carried or the store")
+		return
+	ok("take-empty")
+
+
+func camera_key(value, path: String) -> String:
+	if value is Dictionary:
+		for key in value.keys():
+			var name := str(key)
+			var lower := name.to_lower()
+			if lower == "camera" or lower.contains("camera"):
+				return path + name
+			var nested := camera_key(value[key], path + name + ".")
+			if nested != "":
+				return nested
+	elif value is Array:
+		for i in value.size():
+			var nested := camera_key(value[i], "%s%d." % [path, i])
+			if nested != "":
+				return nested
+	return ""
+
+
+func stocked_world(check: String) -> bool:
+	var grain_id := resolved_id(check, "item", "grain", ITEM_GRAIN)
+	if failed or grain_id < 0:
+		return false
+	var s := snap()
+	if failed:
+		return false
+	var person := person_by_index(s, 0)
+	var start := carried_count(person, grain_id)
+	if start < 1:
+		fail(check, "person 0 carries no grain to store")
+		return false
+	var at := free_cell(Vector2(float(person["x"]), float(person["y"])), occupied_cells(s))
+	if not at.is_finite():
+		fail(check, "no free cell for the stockpile")
+		return false
+	var building := finish_placed(check, STOCKPILE, at)
+	if failed or building.is_empty():
+		return false
+	return haul_grain_into(check, building, grain_id, start)
+
+
+func run_save() -> void:
+	if not begin("save"):
+		return
+	if not require_method("save_json", "save") or not require_method("load_json", "save"):
+		return
+	if not stocked_world("save"):
+		return
+	var before := snap()
+	if failed:
+		return
+	if str(building_sig(before)) == "":
+		fail("save", "refusing to round-trip a world with no buildings")
+		return
+	var save_text := str(host.call("save_json"))
+	if save_text == "":
+		fail("save", "save_json returned empty")
+		return
+	if save_text.to_lower().contains("camera"):
+		fail("camera", "save text contains 'camera'")
+		return
+	var parsed = JSON.parse_string(save_text)
+	if parsed == null or not (parsed is Dictionary):
+		fail("save", "save_json is not a JSON object")
+		return
+	var cam := camera_key(parsed, "")
+	if cam != "":
+		fail("camera", "save key '%s'" % cam)
+		return
+	ok("camera")
+	if int(parsed.get("save_version", -1)) != SAVE_VERSION_1B:
+		fail("save", "save_version %s, expected %d" % [str(parsed.get("save_version")), SAVE_VERSION_1B])
+		return
+	var saved_hash := hash_string()
+	var saved_tick := int(host.call("tick"))
+	var saved_buildings := building_sig(before)
+	var saved_grain := carried_count(person_by_index(before, 0), ITEM_GRAIN)
+	if saved_tick <= 0:
+		fail("save", "refusing to round-trip a tick-0 world")
+		return
+	host.call("new_game", SEED)
+	if hash_string() == saved_hash:
+		fail("save", "new_game left the saved hash %s" % saved_hash)
+		return
+	var code = host.call("load_json", save_text)
+	if code == null or int(code) != 0:
+		fail("save", "load_json returned %s" % str(code))
+		return
+	if hash_string() != saved_hash:
+		fail("save", "hash after load %s != saved %s" % [hash_string(), saved_hash])
+		return
+	var after := snap()
+	if failed:
+		return
+	if int(after.get("tick", -1)) != saved_tick or int(host.call("tick")) != saved_tick:
+		fail("save", "tick after load %s / %s, expected %d" % [str(after.get("tick")), str(host.call("tick")), saved_tick])
+		return
+	if building_sig(after) != saved_buildings:
+		fail("save", "buildings after load %s != saved %s" % [building_sig(after), saved_buildings])
+		return
+	if carried_count(person_by_index(after, 0), ITEM_GRAIN) != saved_grain:
+		fail("save", "carried grain after load changed")
+		return
+	ok("save")

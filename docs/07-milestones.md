@@ -52,6 +52,8 @@ Acceptance:
 - Save, load, and compare: needs, positions, jobs, inventory, tick count, and RNG stream state survive the round trip with an equal state hash. A second run from the same seed and command list matches it.
 - The camera is not in the save.
 
+**Done, 2026-10-18 (contract `a7f2464`; the code and this line landed together).** The gate is `nix run .#test`: 53 sim tests, the milestone 0 smoke line, then `scripts/check-1a.sh` and `scripts/check-1b.sh`. 1a's nine checks still pass, and 1b adds nine more through the bridge: a placement appearing in the snapshot and its progress rising to `BUILD_TICKS`, `no station` for a recipe with no fire, `no material` for a missing input, a meal crafted at a finished campfire, a haul into a store, a take back out, an empty store failing `no material`, the camera absent from the save, and a save that round-trips buildings, their progress and their contents to an equal state hash. Every 1b acceptance line above is covered by one of those checks. What the review frames establish, and what a person still has to judge, is in `docs/playtests/2026-10-18-1b-buildings.md`.
+
 ## 2 — The body keeps score
 
 Add body regions, bleeding, infection, temperature, fatigue, and sleep. Use-based skills rise on the actions a person actually performs. Tools change speed and failure.

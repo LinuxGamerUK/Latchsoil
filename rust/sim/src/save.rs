@@ -87,9 +87,8 @@ pub fn load_from_json(text: &str) -> Result<SimState, SaveError> {
         });
     }
     let doc: SavedWorld = serde_json::from_str(text).map_err(SaveError::Json)?;
-    let loaded = world_from_saved(doc).map_err(|msg| {
-        SaveError::Json(serde::de::Error::custom(msg))
-    })?;
+    let loaded =
+        world_from_saved(doc).map_err(|msg| SaveError::Json(serde::de::Error::custom(msg)))?;
     let mut sim = SimState::new(loaded.seed);
     // install_loaded logs a queue clear. A fresh sim's queue is empty.
     sim.install_loaded(loaded);

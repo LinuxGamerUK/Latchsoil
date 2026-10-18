@@ -10,23 +10,49 @@ use std::fmt;
 /// Player order. One variant per verb the bridge accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Command {
-    Move { actor: EntityId, to: [f32; 2] },
-    Gather { actor: EntityId, node: EntityId },
-    Eat { actor: EntityId, item: ItemId },
+    Move {
+        actor: EntityId,
+        to: [f32; 2],
+    },
+    Gather {
+        actor: EntityId,
+        node: EntityId,
+    },
+    Eat {
+        actor: EntityId,
+        item: ItemId,
+    },
     Haul {
         actor: EntityId,
         item: ItemId,
         to: EntityId,
     },
-    Work { actor: EntityId, job: JobKind },
+    Work {
+        actor: EntityId,
+        job: JobKind,
+    },
     Place {
         actor: EntityId,
         building: BuildingKind,
         at: [f32; 2],
     },
-    Craft { actor: EntityId, recipe: RecipeId },
-    Draft { actor: EntityId, drafted: bool },
-    Attack { actor: EntityId, target: EntityId },
+    Craft {
+        actor: EntityId,
+        recipe: RecipeId,
+    },
+    Draft {
+        actor: EntityId,
+        drafted: bool,
+    },
+    Attack {
+        actor: EntityId,
+        target: EntityId,
+    },
+    Take {
+        actor: EntityId,
+        item: ItemId,
+        from: EntityId,
+    },
 }
 
 impl Command {
@@ -40,7 +66,8 @@ impl Command {
             | Self::Place { actor, .. }
             | Self::Craft { actor, .. }
             | Self::Draft { actor, .. }
-            | Self::Attack { actor, .. } => actor,
+            | Self::Attack { actor, .. }
+            | Self::Take { actor, .. } => actor,
         }
     }
 
@@ -56,6 +83,7 @@ impl Command {
             Self::Craft { .. } => "craft",
             Self::Draft { .. } => "draft",
             Self::Attack { .. } => "attack",
+            Self::Take { .. } => "take",
         }
     }
 
@@ -72,6 +100,7 @@ impl Command {
                 | Self::Work { .. }
                 | Self::Place { .. }
                 | Self::Craft { .. }
+                | Self::Take { .. }
         )
     }
 }
@@ -86,7 +115,7 @@ pub const QUEUE_FULL: u8 = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemId(pub u32);
 
-/// Recipe id from the loaded tables. None are loaded in milestone 1a.
+/// Recipe id from the loaded tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecipeId(pub u32);
 
@@ -172,6 +201,7 @@ pub enum FailureReason {
     Afraid = 4,
     Night = 5,
     Wounded = 6,
+    NoStation = 7,
 }
 
 impl FailureReason {
@@ -188,6 +218,7 @@ impl FailureReason {
             4 => Self::Afraid,
             5 => Self::Night,
             6 => Self::Wounded,
+            7 => Self::NoStation,
             _ => return None,
         })
     }
@@ -202,6 +233,7 @@ impl FailureReason {
             Self::Afraid => "afraid",
             Self::Night => "night",
             Self::Wounded => "wounded",
+            Self::NoStation => "no station",
         }
     }
 }
@@ -226,6 +258,7 @@ mod tests {
             (FailureReason::Afraid, "afraid", 4),
             (FailureReason::Night, "night", 5),
             (FailureReason::Wounded, "wounded", 6),
+            (FailureReason::NoStation, "no station", 7),
         ];
         for (reason, word, disc) in cases {
             assert_eq!(reason.as_str(), word);
@@ -233,7 +266,7 @@ mod tests {
             assert_eq!(reason.discriminant(), disc);
             assert_eq!(FailureReason::from_discriminant(disc as u32), Some(reason));
         }
-        assert_eq!(FailureReason::from_discriminant(7), None);
+        assert_eq!(FailureReason::from_discriminant(8), None);
     }
 
     #[test]

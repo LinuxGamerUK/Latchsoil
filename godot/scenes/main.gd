@@ -1,10 +1,15 @@
 extends Node3D
 
-# Milestone 1a blockout. Godot presents; the sim decides.
+# Milestone 1b blockout. Godot presents; the sim decides.
 # Time advances only through frame(). This scene never calls step.
 
 const HOST_CLASS := "SimHost"
 const SEED := 1
+const BUILD_TICKS := 60
+const KIND_STOCKPILE := 2
+const RECIPE_NAMES: PackedStringArray = ["knife", "meal", "bandage"]
+const BUILDING_NAMES: PackedStringArray = ["campfire", "lean-to", "stockpile"]
+const ITEM_FALLBACK: PackedStringArray = ["grain", "wood", "stone", "fiber", "water", "knife", "meal", "bandage"]
 const REQUIRED: PackedStringArray = [
 	"new_game", "attach", "frame", "poll", "set_paused",
 	"submit_move", "submit_gather", "submit_eat",
@@ -18,6 +23,16 @@ var selection: Array = []
 var rejects: Dictionary = {}
 var last_snap: Dictionary = {}
 var grain_id := -1
+var item_names: Dictionary = {}
+var recipe_names: Dictionary = {}
+var build_mode := false
+var craft_mode := false
+var build_kind := 0
+var building_sel: Dictionary = {}
+var armed_carry_id := -1
+var armed_store_id := -1
+var ghost_point = null
+var _ghost_shown := false
 var _frame_budget := -1
 var _shot_path := ""
 var _shot_left := 0
@@ -34,6 +49,11 @@ func _ready() -> void:
 	_dress_light()
 	_read_frame_budget()
 	_read_screenshot()
+	if hud.has_signal("build_kind_chosen"):
+		hud.build_kind_chosen.connect(_on_build_kind)
+		hud.craft_chosen.connect(_on_craft_slot)
+		hud.haul_asked.connect(_on_haul_asked)
+		hud.take_asked.connect(_on_take_asked)
 	_boot_sim()
 
 
@@ -59,6 +79,7 @@ func _process(delta: float) -> void:
 	else:
 		_warn_once("poll_type", "latchsoil: poll did not return a dictionary")
 	_apply_sun()
+	_track_ghost()
 	_refresh_hud()
 	if _shot_left > 0:
 		_shot_left -= 1
@@ -84,6 +105,30 @@ func _unhandled_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 		elif event.keycode == KEY_F:
 			_order_eat()
+			get_viewport().set_input_as_handled()
+		elif event.keycode == KEY_B:
+			_toggle_build()
+			get_viewport().set_input_as_handled()
+		elif event.keycode == KEY_C:
+			_toggle_craft()
+			get_viewport().set_input_as_handled()
+		elif event.keycode == KEY_ESCAPE:
+			_exit_modes()
+			get_viewport().set_input_as_handled()
+		elif event.keycode == KEY_H:
+			_on_haul_asked()
+			get_viewport().set_input_as_handled()
+		elif event.keycode == KEY_T:
+			_on_take_asked()
+			get_viewport().set_input_as_handled()
+		elif event.keycode == KEY_G:
+			_cycle_carry(1)
+			get_viewport().set_input_as_handled()
+		elif event.keycode == KEY_V:
+			_cycle_store(1)
+			get_viewport().set_input_as_handled()
+		elif event.keycode >= KEY_1 and event.keycode <= KEY_3:
+			_on_number(event.keycode - KEY_1)
 			get_viewport().set_input_as_handled()
 
 
@@ -145,6 +190,10 @@ func _read_catalog() -> void:
 		_warn_once("catalog_items", "latchsoil: catalog items is not an array")
 		return
 	grain_id = _grain_id(items)
+	_store_names(items, item_names)
+	var recipes = cat.get("recipes", [])
+	if recipes is Array:
+		_store_names(recipes, recipe_names)
 	if view.has_method("set_item_names"):
 		view.set_item_names(items)
 
@@ -172,21 +221,41 @@ func _grain_id(items: Array) -> int:
 
 func _on_click(event: InputEventMouseButton) -> void:
 	if event.button_index == MOUSE_BUTTON_LEFT:
+		if build_mode:
+			_place_at_click(event.position)
+			get_viewport().set_input_as_handled()
+			return
 		var person: Dictionary = view.pick_person(camera, event.position)
 		if not person.is_empty():
 			_select(_int_of(person.get("index", -1), -1), _int_of(person.get("generation", -1), -1), event.shift_pressed)
-		elif not event.shift_pressed:
-			selection.clear()
-			_refresh_view()
+		else:
+			var building: Dictionary = view.pick_building(camera, event.position)
+			if not building.is_empty():
+				_select_building(building)
+			elif not event.shift_pressed:
+				selection.clear()
+				_clear_building()
+				_refresh_view()
 		get_viewport().set_input_as_handled()
 	elif event.button_index == MOUSE_BUTTON_RIGHT:
-		var node: Dictionary = view.pick_node(camera, event.position)
-		if not node.is_empty():
-			_order_gather(_int_of(node.get("index", -1), -1), _int_of(node.get("generation", -1), -1))
+		if build_mode or craft_mode:
+			_exit_modes()
+			get_viewport().set_input_as_handled()
+			return
+		var building: Dictionary = view.pick_building(camera, event.position)
+		if not building.is_empty() and _kind_of(building) == KIND_STOCKPILE:
+			if event.shift_pressed:
+				_order_take_from(building)
+			else:
+				_order_haul_to(building)
 		else:
-			var point = view.pick_ground(camera, event.position)
-			if point is Vector3:
-				_order_move(point)
+			var node: Dictionary = view.pick_node(camera, event.position)
+			if not node.is_empty():
+				_order_gather(_int_of(node.get("index", -1), -1), _int_of(node.get("generation", -1), -1))
+			else:
+				var point = view.pick_ground(camera, event.position)
+				if point is Vector3:
+					_order_move(point)
 		get_viewport().set_input_as_handled()
 
 
@@ -233,6 +302,206 @@ func _order_eat() -> void:
 	_refresh_view()
 
 
+func _toggle_build() -> void:
+	build_mode = not build_mode
+	if build_mode:
+		craft_mode = false
+	_refresh_hud()
+
+
+func _toggle_craft() -> void:
+	craft_mode = not craft_mode
+	if craft_mode:
+		build_mode = false
+	_refresh_hud()
+
+
+func _exit_modes() -> void:
+	build_mode = false
+	craft_mode = false
+	_refresh_hud()
+
+
+func _on_number(slot: int) -> void:
+	if build_mode:
+		build_kind = slot
+		_refresh_hud()
+	elif craft_mode:
+		_order_craft(slot)
+		craft_mode = false
+		_refresh_hud()
+
+
+func _on_build_kind(kind: int) -> void:
+	build_kind = kind
+	build_mode = true
+	craft_mode = false
+	_refresh_hud()
+
+
+func _on_craft_slot(slot: int) -> void:
+	_order_craft(slot)
+
+
+func _on_haul_asked() -> void:
+	_order_haul_to(building_sel)
+
+
+func _on_take_asked() -> void:
+	_order_take_from(building_sel)
+
+
+func _place_at_click(mouse: Vector2) -> void:
+	var at = ghost_point
+	if not at is Vector3:
+		var point = view.pick_ground(camera, mouse)
+		if not point is Vector3:
+			return
+		at = view.snap_point(point)
+	_order_place(at)
+
+
+func _order_place(at: Vector3) -> void:
+	if selection.is_empty():
+		_warn_once("place_actor", "latchsoil: place needs a selected person")
+		return
+	var sel = selection[0]
+	var index := _int_of(sel.get("index", -1), -1)
+	var generation := _int_of(sel.get("generation", -1), -1)
+	var result = _submit("submit_place", [index, generation, build_kind, at.x, at.z])
+	if result != null:
+		_note_submit(_id_key(index, generation), result)
+	_refresh_view()
+
+
+func _order_craft(slot: int) -> void:
+	if slot < 0 or slot >= RECIPE_NAMES.size():
+		return
+	if selection.is_empty():
+		_warn_once("craft_actor", "latchsoil: craft needs a selected person")
+		return
+	var recipe_id := _recipe_id(slot)
+	for sel in selection:
+		var index := _int_of(sel.get("index", -1), -1)
+		var generation := _int_of(sel.get("generation", -1), -1)
+		var result = _submit("submit_craft", [index, generation, recipe_id])
+		if result != null:
+			_note_submit(_id_key(index, generation), result)
+	_refresh_view()
+
+
+func _order_haul_to(target: Dictionary) -> void:
+	if target.is_empty() or _kind_of(target) != KIND_STOCKPILE:
+		_warn_once("haul_target", "latchsoil: haul needs a stockpile")
+		return
+	_sync_arms()
+	if armed_carry_id < 0:
+		_warn_once("haul_item", "latchsoil: haul needs a carried item")
+		return
+	if selection.is_empty():
+		_warn_once("haul_actor", "latchsoil: haul needs a selected person")
+		return
+	var to_index := _int_of(target.get("index", -1), -1)
+	var to_generation := _int_of(target.get("generation", -1), -1)
+	for sel in selection:
+		var index := _int_of(sel.get("index", -1), -1)
+		var generation := _int_of(sel.get("generation", -1), -1)
+		var result = _submit("submit_haul", [index, generation, armed_carry_id, to_index, to_generation])
+		if result != null:
+			_note_submit(_id_key(index, generation), result)
+	_refresh_view()
+
+
+func _order_take_from(target: Dictionary) -> void:
+	var row := _building_by_id(target)
+	if row.is_empty() or _int_of(row.get("kind", -1), -1) != KIND_STOCKPILE:
+		_warn_once("take_target", "latchsoil: take needs a stockpile")
+		return
+	if selection.is_empty():
+		_warn_once("take_actor", "latchsoil: take needs a selected person")
+		return
+	var goods := _goods(row.get("contents", []))
+	var item_id := armed_store_id
+	if not _goods_has(goods, item_id):
+		item_id = int(goods[0]["id"]) if not goods.is_empty() else -1
+	if item_id < 0:
+		_warn_once("take_item", "latchsoil: take needs a stored item")
+		return
+	armed_store_id = item_id
+	var from_index := _int_of(target.get("index", -1), -1)
+	var from_generation := _int_of(target.get("generation", -1), -1)
+	for sel in selection:
+		var index := _int_of(sel.get("index", -1), -1)
+		var generation := _int_of(sel.get("generation", -1), -1)
+		var result = _submit("submit_take", [index, generation, item_id, from_index, from_generation])
+		if result != null:
+			_note_submit(_id_key(index, generation), result)
+	_refresh_view()
+
+
+func _submit(method: String, args: Array):
+	if host == null or not host.has_method(method):
+		_warn_once(method, "latchsoil: %s is not on SimHost" % method)
+		return null
+	return host.callv(method, args)
+
+
+func _select_building(pick: Dictionary) -> void:
+	building_sel = {
+		"index": _int_of(pick.get("index", -1), -1),
+		"generation": _int_of(pick.get("generation", -1), -1),
+	}
+	_refresh_view()
+
+
+func _clear_building() -> void:
+	building_sel = {}
+
+
+func _cycle_carry(step: int) -> void:
+	var person := _first_selected_person()
+	var goods := _goods(person.get("carried", [])) if not person.is_empty() else []
+	if goods.is_empty():
+		return
+	var index := _goods_index(goods, armed_carry_id)
+	if index < 0:
+		index = 0
+	else:
+		index = posmod(index + step, goods.size())
+	armed_carry_id = int(goods[index]["id"])
+	_refresh_hud()
+
+
+func _cycle_store(step: int) -> void:
+	var row := _building_by_id(building_sel)
+	var goods := _goods(row.get("contents", [])) if not row.is_empty() else []
+	if goods.is_empty():
+		return
+	var index := _goods_index(goods, armed_store_id)
+	if index < 0:
+		index = 0
+	else:
+		index = posmod(index + step, goods.size())
+	armed_store_id = int(goods[index]["id"])
+	_refresh_hud()
+
+
+func _track_ghost() -> void:
+	if not build_mode or not view.has_method("show_ghost"):
+		if _ghost_shown and view.has_method("hide_ghost"):
+			view.hide_ghost()
+		_ghost_shown = false
+		ghost_point = null
+		return
+	var point = view.pick_ground(camera, get_viewport().get_mouse_position())
+	if not point is Vector3:
+		return
+	var snapped: Vector3 = view.snap_point(point)
+	ghost_point = snapped
+	view.show_ghost(build_kind, snapped)
+	_ghost_shown = true
+
+
 func _note_submit(key: String, result) -> void:
 	if result is int or result is float:
 		if int(result) != 0:
@@ -265,6 +534,11 @@ func _prune_selection(snap: Dictionary) -> void:
 
 
 func _refresh_view() -> void:
+	if view.has_method("clear_building_focus"):
+		if building_sel.is_empty():
+			view.clear_building_focus()
+		else:
+			view.set_building_focus(_int_of(building_sel.get("index", -1), -1), _int_of(building_sel.get("generation", -1), -1))
 	if not last_snap.is_empty() and view.has_method("apply_snapshot"):
 		view.apply_snapshot(last_snap, selection, rejects)
 	_refresh_hud()
@@ -273,7 +547,12 @@ func _refresh_view() -> void:
 func _refresh_hud() -> void:
 	if hud == null or not hud.has_method("show_state"):
 		return
+	_sync_arms()
 	hud.show_state(_int_of(last_snap.get("tick", 0), 0), paused, selection.size(), _failure_text())
+	if hud.has_method("show_detail"):
+		hud.show_detail(_detail_text())
+	if hud.has_method("set_build_highlight"):
+		hud.set_build_highlight(build_kind if build_mode else -1)
 
 
 func _failure_text() -> String:
@@ -303,6 +582,188 @@ func _failure_of(people: Array, index: int, generation: int) -> String:
 		if row is Dictionary and _int_of(row.get("index", -1), -1) == index and _int_of(row.get("generation", -1), -1) == generation:
 			return str(row.get("failure_text", ""))
 	return ""
+
+
+func _detail_text() -> String:
+	var lines := PackedStringArray()
+	var carry := _carry_line()
+	if carry != "":
+		lines.append(carry)
+	if not selection.is_empty() and armed_carry_id >= 0:
+		lines.append("haul %s" % _item_name(armed_carry_id))
+	var building := _building_by_id(building_sel)
+	if not building.is_empty():
+		lines.append(_progress_line(building))
+		if _int_of(building.get("kind", -1), -1) == KIND_STOCKPILE:
+			lines.append(_holds_line(building))
+			if armed_store_id >= 0:
+				lines.append("take %s" % _item_name(armed_store_id))
+	if build_mode:
+		lines.append("placing %s" % _building_name(build_kind))
+	if craft_mode:
+		lines.append("craft  1 %s  2 %s  3 %s" % [RECIPE_NAMES[0], RECIPE_NAMES[1], RECIPE_NAMES[2]])
+	return "\n".join(lines)
+
+
+func _carry_line() -> String:
+	var bits := PackedStringArray()
+	for sel in selection:
+		if not sel is Dictionary:
+			continue
+		var person := _person_by_id(sel)
+		if person.is_empty():
+			continue
+		var goods := _goods(person.get("carried", []))
+		if goods.is_empty():
+			bits.append("nothing")
+		else:
+			bits.append(", ".join(_goods_text(goods)))
+	if bits.is_empty():
+		return ""
+	return "carries " + " · ".join(bits)
+
+
+func _progress_line(row: Dictionary) -> String:
+	var name := _building_name(_int_of(row.get("kind", -1), -1))
+	if not row.has("progress"):
+		return name
+	return "%s %d/%d" % [name, _int_of(row.get("progress", 0), 0), BUILD_TICKS]
+
+
+func _holds_line(row: Dictionary) -> String:
+	var goods := _goods(row.get("contents", []))
+	if goods.is_empty():
+		return "holds nothing"
+	return "holds " + ", ".join(_goods_text(goods))
+
+
+func _sync_arms() -> void:
+	var person := _first_selected_person()
+	var carried := _goods(person.get("carried", [])) if not person.is_empty() else []
+	if not _goods_has(carried, armed_carry_id):
+		armed_carry_id = int(carried[0]["id"]) if not carried.is_empty() else -1
+	var building := _building_by_id(building_sel)
+	var stored: Array = []
+	if not building.is_empty() and _int_of(building.get("kind", -1), -1) == KIND_STOCKPILE:
+		stored = _goods(building.get("contents", []))
+	if not _goods_has(stored, armed_store_id):
+		armed_store_id = int(stored[0]["id"]) if not stored.is_empty() else -1
+
+
+func _goods(value) -> Array:
+	var out: Array = []
+	if not value is Array or value.is_empty():
+		return out
+	if value[0] is Array or value[0] is PackedInt32Array:
+		for pair in value:
+			if (pair is Array or pair is PackedInt32Array) and pair.size() >= 2:
+				var count := _int_of(pair[1], 0)
+				if count > 0:
+					out.append({"id": _int_of(pair[0], -1), "count": count})
+		return out
+	var i := 0
+	while i + 1 < value.size():
+		var count := _int_of(value[i + 1], 0)
+		if count > 0:
+			out.append({"id": _int_of(value[i], -1), "count": count})
+		i += 2
+	return out
+
+
+func _goods_text(goods: Array) -> PackedStringArray:
+	var parts := PackedStringArray()
+	for pair in goods:
+		parts.append("%s %d" % [_item_name(int(pair["id"])), int(pair["count"])])
+	return parts
+
+
+func _goods_has(goods: Array, item_id: int) -> bool:
+	return _goods_index(goods, item_id) >= 0
+
+
+func _goods_index(goods: Array, item_id: int) -> int:
+	for i in goods.size():
+		if int(goods[i]["id"]) == item_id:
+			return i
+	return -1
+
+
+func _first_selected_person() -> Dictionary:
+	if selection.is_empty() or not selection[0] is Dictionary:
+		return {}
+	return _person_by_id(selection[0])
+
+
+func _person_by_id(pick: Dictionary) -> Dictionary:
+	return _row_by_id(last_snap.get("people", []), pick)
+
+
+func _building_by_id(pick: Dictionary) -> Dictionary:
+	if pick.is_empty():
+		return {}
+	return _row_by_id(last_snap.get("buildings", []), pick)
+
+
+func _row_by_id(rows, pick: Dictionary) -> Dictionary:
+	if not rows is Array or pick.is_empty():
+		return {}
+	var index := _int_of(pick.get("index", -1), -1)
+	var generation := _int_of(pick.get("generation", -1), -1)
+	for row in rows:
+		if row is Dictionary and _int_of(row.get("index", -1), -1) == index and _int_of(row.get("generation", -1), -1) == generation:
+			return row
+	return {}
+
+
+func _kind_of(pick: Dictionary) -> int:
+	var row := _building_by_id(pick)
+	if not row.is_empty():
+		return _int_of(row.get("kind", -1), -1)
+	return -1
+
+
+func _item_name(item_id: int) -> String:
+	if item_names.has(item_id):
+		return str(item_names[item_id])
+	if item_id >= 0 and item_id < ITEM_FALLBACK.size():
+		return ITEM_FALLBACK[item_id]
+	return "item %d" % item_id
+
+
+func _building_name(kind: int) -> String:
+	if kind >= 0 and kind < BUILDING_NAMES.size():
+		return BUILDING_NAMES[kind]
+	return "building"
+
+
+func _recipe_id(slot: int) -> int:
+	if slot < 0 or slot >= RECIPE_NAMES.size():
+		return slot
+	var want := RECIPE_NAMES[slot]
+	var exact := -1
+	var fuzzy := -1
+	for id in recipe_names.keys():
+		var name := str(recipe_names[id]).to_lower().strip_edges()
+		if name == want:
+			exact = int(id)
+		elif fuzzy < 0 and want in name:
+			fuzzy = int(id)
+	if exact >= 0:
+		return exact
+	if fuzzy >= 0:
+		return fuzzy
+	return slot
+
+
+func _store_names(rows: Array, into: Dictionary) -> void:
+	into.clear()
+	for row in rows:
+		if not row is Dictionary:
+			continue
+		var id := _int_of(row.get("id", -1), -1)
+		if id < 0:
+			continue
+		into[id] = str(row.get("name", ""))
 
 
 func _check_keys(snap: Dictionary) -> void:

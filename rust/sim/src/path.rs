@@ -4,9 +4,7 @@
 //! floor of each axis. Neighbour order is fixed (east, south, west, north).
 //! Nothing here walks a `HashMap`.
 
-use crate::rules::{
-    dist, ACRE_CELLS, NEIGHBOURS, WAYPOINT_REACH_METERS,
-};
+use crate::rules::{dist, ACRE_CELLS, NEIGHBOURS, WAYPOINT_REACH_METERS};
 
 /// Cell containing `(x, y)`, or `None` when the point is outside the acre
 /// or not finite.

@@ -1,15 +1,15 @@
-//! Milestone 1a rules. Headless. No Godot process.
+//! Milestone 1a rules that still hold. Headless. No Godot process.
 //!
 //! Thresholds named here are the sim constants: hunger work is refused below
 //! 0.35, health below 0.30, night from tick 5760 of a 7200-tick day.
 
 use latchsoil_sim::{
-    load_from_json, night_at, save_to_json, BuildingKind, Command, EntityId, FailureReason, ItemId,
-    JobKind, SimState, CARRY_CAP, EAT_HUNGER_RESTORE, EAT_THIRST_RESTORE, GATHER_TICKS_PER_UNIT,
+    load_from_json, night_at, save_to_json, Command, EntityId, FailureReason, ItemId, JobKind,
+    SimState, CARRY_CAP, EAT_HUNGER_RESTORE, EAT_THIRST_RESTORE, GATHER_TICKS_PER_UNIT,
     HEALTH_FULL_TICKS, HEALTH_PER_TICK, HEALTH_REFUSAL, HUNGER_FULL_TICKS, HUNGER_PER_TICK,
     HUNGER_REFUSAL, ITEM_GRAIN, ITEM_WOOD, MALFORMED, NIGHT_START_TICK, PEG_X, PEG_Y, QUEUED,
-    QUEUE_CAP, QUEUE_FULL, STALE, STARTING_GRAIN, THIRST_FULL_TICKS, THIRST_PER_TICK, TICKS_PER_DAY,
-    WALK_METERS_PER_TICK, WAYPOINT_REACH_METERS,
+    QUEUE_CAP, QUEUE_FULL, STALE, STARTING_GRAIN, THIRST_FULL_TICKS, THIRST_PER_TICK,
+    TICKS_PER_DAY, WALK_METERS_PER_TICK, WAYPOINT_REACH_METERS,
 };
 
 fn started(seed: u64) -> SimState {
@@ -114,16 +114,35 @@ fn same_seed_reproduces_the_acre_and_a_different_seed_does_not() {
             assert!(apart >= 2.0, "nodes {i} and {j} are {apart} m apart");
         }
     }
-    let wood = a.catalog().items.into_iter().find(|row| row.name == "wood").unwrap();
-    assert!(a.view().nodes.iter().any(|node| node.yield_item == wood.id && node.remaining == 40));
+    let wood = a
+        .catalog()
+        .items
+        .into_iter()
+        .find(|row| row.name == "wood")
+        .unwrap();
+    assert!(a
+        .view()
+        .nodes
+        .iter()
+        .any(|node| node.yield_item == wood.id && node.remaining == 40));
 
     let other = started(8);
     assert_ne!(a.state_hash(), other.state_hash());
-    let same_places = a.view().nodes.iter().zip(other.view().nodes.iter()).all(|(left, right)| {
-        left.x.to_bits() == right.x.to_bits() && left.y.to_bits() == right.y.to_bits()
-    }) && a.view().people.iter().zip(other.view().people.iter()).all(|(left, right)| {
-        left.x.to_bits() == right.x.to_bits() && left.y.to_bits() == right.y.to_bits()
-    });
+    let same_places = a
+        .view()
+        .nodes
+        .iter()
+        .zip(other.view().nodes.iter())
+        .all(|(left, right)| {
+            left.x.to_bits() == right.x.to_bits() && left.y.to_bits() == right.y.to_bits()
+        })
+        && a.view()
+            .people
+            .iter()
+            .zip(other.view().people.iter())
+            .all(|(left, right)| {
+                left.x.to_bits() == right.x.to_bits() && left.y.to_bits() == right.y.to_bits()
+            });
     assert!(!same_places, "seed 7 and seed 8 laid the same cast");
 }
 
@@ -140,10 +159,17 @@ fn move_advances_0_14_m_per_tick_and_completes() {
         QUEUED
     );
     let before = sim.state_hash();
-    assert_eq!(sim.state_hash(), before, "the unapplied queue is not hashed");
+    assert_eq!(
+        sim.state_hash(),
+        before,
+        "the unapplied queue is not hashed"
+    );
     sim.step();
     let moved = view_person(&sim, 0);
-    assert_eq!(moved.x.to_bits(), (start.x + WALK_METERS_PER_TICK).to_bits());
+    assert_eq!(
+        moved.x.to_bits(),
+        (start.x + WALK_METERS_PER_TICK).to_bits()
+    );
     assert_eq!(moved.y.to_bits(), start.y.to_bits());
     assert_eq!(WALK_METERS_PER_TICK, 0.14);
     assert!(!moved.path.is_empty() || dist([moved.x, moved.y], dest) <= WAYPOINT_REACH_METERS);
@@ -153,7 +179,10 @@ fn move_advances_0_14_m_per_tick_and_completes() {
         sim.step();
     }
     let mid = view_person(&sim, 0);
-    assert!(!mid.path.is_empty(), "waypoint must not be reached before 0.1 m");
+    assert!(
+        !mid.path.is_empty(),
+        "waypoint must not be reached before 0.1 m"
+    );
     assert!(dist([mid.x, mid.y], dest) > WAYPOINT_REACH_METERS);
     sim.step();
     let done = view_person(&sim, 0);
@@ -194,7 +223,10 @@ fn a_new_command_clears_the_previous_failure() {
     sim.step();
     assert_eq!(view_person(&sim, 0).failure_text, "no path");
     let here = view_person(&sim, 0);
-    assert_eq!(sim.submit_move(0, here.generation, here.x + 2.0, here.y), QUEUED);
+    assert_eq!(
+        sim.submit_move(0, here.generation, here.x + 2.0, here.y),
+        QUEUED
+    );
     let cleared = view_person(&sim, 0);
     assert_eq!(cleared.failure, -1);
     assert_eq!(cleared.failure_text, "");
@@ -232,7 +264,10 @@ fn gather_walks_adds_one_per_20_ticks_caps_at_20_and_drain_fails() {
     assert!(guard > 1, "gather must walk before the first unit");
     for _ in 0..(GATHER_TICKS_PER_UNIT - 1) {
         sim.step();
-        assert_eq!(carried_of(&view_person(&sim, 0).carried, wood.yield_item), 0);
+        assert_eq!(
+            carried_of(&view_person(&sim, 0).carried, wood.yield_item),
+            0
+        );
         assert_eq!(view_node(&sim, wood.index).remaining, 40);
     }
     sim.step();
@@ -243,14 +278,24 @@ fn gather_walks_adds_one_per_20_ticks_caps_at_20_and_drain_fails() {
 
     // Cap: keep gathering until 20, then the order stops adding.
     let mut guard = 0;
-    while view_person(&sim, 0).carried.iter().map(|pair| pair[1]).sum::<u32>() < CARRY_CAP {
+    while view_person(&sim, 0)
+        .carried
+        .iter()
+        .map(|pair| pair[1])
+        .sum::<u32>()
+        < CARRY_CAP
+    {
         sim.step();
         guard += 1;
         assert!(guard < 800, "did not fill the carry cap");
         assert_eq!(view_person(&sim, 0).failure, -1);
     }
     assert_eq!(CARRY_CAP, 20);
-    let filled = view_person(&sim, 0).carried.iter().map(|pair| pair[1]).sum::<u32>();
+    let filled = view_person(&sim, 0)
+        .carried
+        .iter()
+        .map(|pair| pair[1])
+        .sum::<u32>();
     assert_eq!(filled, 20);
     let remaining_at_cap = view_node(&sim, wood.index).remaining;
     // The cap counts the starting ration, so only sixteen units come off the node.
@@ -259,7 +304,11 @@ fn gather_walks_adds_one_per_20_ticks_caps_at_20_and_drain_fails() {
         sim.step();
     }
     assert_eq!(
-        view_person(&sim, 0).carried.iter().map(|pair| pair[1]).sum::<u32>(),
+        view_person(&sim, 0)
+            .carried
+            .iter()
+            .map(|pair| pair[1])
+            .sum::<u32>(),
         20
     );
     assert_eq!(view_node(&sim, wood.index).remaining, remaining_at_cap);
@@ -280,8 +329,7 @@ fn gather_walks_adds_one_per_20_ticks_caps_at_20_and_drain_fails() {
         guard += 1;
         assert!(guard < 400, "did not reach the drained-setup node");
         let walker = view_person(&sim, 0);
-        if walker.path.is_empty() && dist([walker.x, walker.y], node_pos) <= WAYPOINT_REACH_METERS
-        {
+        if walker.path.is_empty() && dist([walker.x, walker.y], node_pos) <= WAYPOINT_REACH_METERS {
             break;
         }
         assert_eq!(walker.failure, -1, "{}", walker.failure_text);
@@ -397,7 +445,10 @@ fn hungry_wounded_and_night_follow_thresholds_and_precedence() {
     // Eat is not a work order: hunger does not refuse it, it goes through.
     let mut starving = with_needs(0.1, 1.0, 1.0, 0);
     let person = view_person(&starving, 0);
-    assert_eq!(starving.submit_eat(0, person.generation, ITEM_GRAIN.0), QUEUED);
+    assert_eq!(
+        starving.submit_eat(0, person.generation, ITEM_GRAIN.0),
+        QUEUED
+    );
     starving.step();
     let fed = view_person(&starving, 0);
     assert_eq!(fed.failure_text, "", "a starving person may still eat");
@@ -407,7 +458,10 @@ fn hungry_wounded_and_night_follow_thresholds_and_precedence() {
     let mut sim = with_needs(0.1, 1.0, 1.0, 0);
     let person = view_person(&sim, 0);
     let node = sim.view().nodes[0].clone();
-    assert_eq!(sim.submit_gather(0, person.generation, node.index, node.generation), QUEUED);
+    assert_eq!(
+        sim.submit_gather(0, person.generation, node.index, node.generation),
+        QUEUED
+    );
     assert_eq!(view_person(&sim, 0).failure_text, "hungry");
 }
 
@@ -430,7 +484,10 @@ fn refusal(sim: &SimState) -> String {
     let mut sim = sim.clone();
     let person = view_person(&sim, 0);
     let before = [person.x, person.y];
-    assert_eq!(sim.submit_move(0, person.generation, person.x + 3.0, person.y), QUEUED);
+    assert_eq!(
+        sim.submit_move(0, person.generation, person.x + 3.0, person.y),
+        QUEUED
+    );
     let text = view_person(&sim, 0).failure_text.clone();
     sim.step();
     let after = view_person(&sim, 0);
@@ -534,20 +591,32 @@ fn stale_wrong_kind_and_queue_full_are_counted() {
     assert_eq!(sim.state_hash(), hash);
 
     let node = sim.view().nodes[0].clone();
-    assert_eq!(sim.submit_move(node.index, node.generation, 18.0, 16.0), MALFORMED);
+    assert_eq!(
+        sim.submit_move(node.index, node.generation, 18.0, 16.0),
+        MALFORMED
+    );
     assert_eq!(sim.rejections().malformed, 1);
     assert_eq!(sim.state_hash(), hash);
 
     let person = view_person(&sim, 0);
-    assert_eq!(sim.submit_gather(0, person.generation, 1, person.generation), MALFORMED);
+    assert_eq!(
+        sim.submit_gather(0, person.generation, 1, person.generation),
+        MALFORMED
+    );
     assert_eq!(sim.rejections().malformed, 2);
-    assert_eq!(sim.submit_move(0, person.generation, f32::NAN, 1.0), MALFORMED);
+    assert_eq!(
+        sim.submit_move(0, person.generation, f32::NAN, 1.0),
+        MALFORMED
+    );
     assert_eq!(sim.state_hash(), hash);
 
     for _ in 0..QUEUE_CAP {
         assert_eq!(sim.submit_move(0, person.generation, 20.0, 16.0), QUEUED);
     }
-    assert_eq!(sim.submit_move(0, person.generation, 20.0, 16.0), QUEUE_FULL);
+    assert_eq!(
+        sim.submit_move(0, person.generation, 20.0, 16.0),
+        QUEUE_FULL
+    );
     assert_eq!(sim.rejections().queue_full, 1);
     assert_eq!(QUEUE_CAP, 256);
     assert_eq!(sim.state_hash(), hash);
@@ -695,20 +764,6 @@ fn the_other_commands_are_stored_and_do_nothing() {
     assert!(working.path.is_empty());
 
     assert_eq!(
-        sim.submit(Command::Place {
-            actor: actor(&sim, 0),
-            building: BuildingKind::Campfire,
-            at: [10.0, 12.0],
-        }),
-        QUEUED
-    );
-    sim.step();
-    let placing = view_person(&sim, 0);
-    assert_eq!(placing.dest, vec![10.0, 12.0]);
-    assert!(sim.view().buildings.is_empty());
-    assert_eq!(placing.x.to_bits(), start.x.to_bits());
-
-    assert_eq!(
         sim.submit(Command::Attack {
             actor: actor(&sim, 0),
             target: EntityId {
@@ -724,7 +779,7 @@ fn the_other_commands_are_stored_and_do_nothing() {
     assert!(attacking.path.is_empty());
     assert_eq!(attacking.x.to_bits(), start.x.to_bits());
 
-    assert_eq!(sim.submit_craft(0, start.generation, 0), MALFORMED);
+    assert_eq!(sim.submit_craft(0, start.generation, 99), MALFORMED);
     assert_eq!(
         sim.submit(Command::Haul {
             actor: actor(&sim, 0),
