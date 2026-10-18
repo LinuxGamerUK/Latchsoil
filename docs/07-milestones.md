@@ -2,7 +2,7 @@
 
 Implement these in order. Each one ends in a commit. Do not start the next while the current acceptance check is failing. Placeholder art is part of finishing a milestone, not a later art pass that blocks the sim.
 
-The current milestone, as of the design commit, is **none**. Milestone 0 is complete; milestone 1a is next, and starts when Gavin asks for it.
+The current milestone, as of the design commit, is **none**. Milestone 0 and milestone 1a are complete; milestone 1b is next, and starts when Gavin asks for it.
 
 ## Agent rules
 
@@ -37,6 +37,8 @@ Acceptance:
 - A headless scenario issues move, gather and eat orders and asserts the sim state changed as ordered (position, carried goods, hunger).
 - A headless order that cannot be satisfied writes the reason string, and the test names each reason it covers.
 - On a real machine, selection, the order path, and the failure line are readable at holding zoom. Write the note in `docs/playtests/`.
+
+**Done, 2026-10-18 (`9cd8a04`).** The gate is `nix run .#test`: 38 sim tests, the milestone 0 smoke line, then `scripts/check-1a.sh`, which proves the first two acceptance lines through the bridge — cast placed, a move in flight, a gather that adds to carried goods and drains the node, eat refused as `no material` with and without goods, `no path` for an order outside the acre, a stale id rejected without disturbing the world, and the same seed and command list giving the same hash from both `step` and `frame`. The third line owes a human's eyes: `scripts/render.sh` produces review frames from a display-less host, and a playtest note records what a person saw.
 
 ## 1b — One holding, one save
 

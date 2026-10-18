@@ -53,10 +53,10 @@ func show_state(tick: int, paused: bool, selected: int, failure_text: String) ->
 	var day_index := int(float(tick) / float(TICKS_PER_DAY))
 	var season_index := int(float(day_index) / float(DAYS_PER_SEASON)) % 4
 	var season: String = SEASONS[season_index]
-	var text := "tick %d  day %d  %s" % [tick, day_index, season]
+	var text := "tick %d  day %d  season %s" % [tick, day_index, season]
 	if paused:
 		text += "  PAUSED"
-	text += "  selected %d  F eat" % selected
+	text += "  selected %d  F = eat" % selected
 	line.text = text
 	# The sim's string is the whole line. No name, no prefix, no second wording.
 	var reason := get_node_or_null("Reason") as Label

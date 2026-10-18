@@ -18,6 +18,16 @@ const NODE_START := {
 	"water": 100,
 }
 const NODE_FILL_MIN := 0.35
+const RIBBON_WIDTH := 0.6
+# Wider than this, the holding is read from silhouette and ground marks.
+# The HUD already names the selected job, and a billboard covers the ring.
+const LABEL_HIDE_ABOVE := 30.0
+const LABEL_REF_ORTHO := 12.0
+const LABEL_FONT := 64
+const LABEL_REF_METERS := 0.58
+const LABEL_LIFT := 2.75
+
+var label_hide_above := LABEL_HIDE_ABOVE
 
 var people: Dictionary = {}
 var eating: Dictionary = {}
@@ -69,6 +79,12 @@ func _ready() -> void:
 	path_root = Node3D.new()
 	path_root.name = "Paths"
 	add_child(path_root)
+
+
+func _process(_delta: float) -> void:
+	# Zoom changes the orthographic size without a new snapshot. The label has
+	# to track that, or a fixed-pixel billboard covers the ring on the way out.
+	_fit_job_labels()
 
 
 func set_item_names(items: Array) -> void:
@@ -138,9 +154,7 @@ func _sync_people(rows: Array, full: bool, sel_keys: Dictionary, rejects: Dictio
 			body = _make_person(index, generation)
 			people[key] = body
 			people_root.add_child(body)
-		body.position = Vector3(_float_of(row.get("x"), 0.0), 0.0, _float_of(row.get("y"), 0.0))
-		_face(body, row)
-		body.force_update_transform()
+		_place_person(body, row)
 		_style_person(body, row, sel_keys.has(key), _marked(row, key, rejects), tick)
 	if full:
 		_drop_missing(people, seen)
@@ -218,7 +232,7 @@ func _show_order(key: String, row: Dictionary, ordinal: int) -> void:
 	if points.size() >= 2:
 		mesh_node.visible = true
 		mesh_node.material_override = _path_material(ordinal)
-		mesh_node.mesh = _ribbon(points, 0.4)
+		mesh_node.mesh = _ribbon(points, RIBBON_WIDTH)
 	else:
 		mesh_node.visible = false
 	var dest = _dest_point(row.get("dest", []))
@@ -266,10 +280,11 @@ func _style_person(body: AnimatableBody3D, row: Dictionary, selected: bool, mark
 		for seg in ring.get_children():
 			if seg is MeshInstance3D:
 				seg.material_override = ring_mat
+	body.set_meta("show_job", selected)
 	var label := body.get_node_or_null("JobLabel") as Label3D
 	if label != null:
-		label.visible = selected
 		label.text = _job_name(row, tick)
+		_fit_job_label(label, selected)
 
 
 func _job_name(row: Dictionary, tick: int) -> String:
@@ -328,20 +343,72 @@ func _marked(row: Dictionary, key: String, rejects: Dictionary) -> bool:
 	return _int_of(row.get("failure", -1), -1) >= 0
 
 
-func _face(body: Node3D, row: Dictionary) -> void:
-	var origin := body.global_position
-	var aim: Variant = null
+func _place_person(body: AnimatableBody3D, row: Dictionary) -> void:
+	# A physics sync copies the server origin back onto the node. look_at reads
+	# a stale global transform and writes that origin over the position just
+	# set, so the sync then repeats the reset. Place from the snapshot and aim
+	# with the basis only, so the origin we wrote is the one that stays.
+	body.sync_to_physics = false
+	var placed := Vector3(_float_of(row.get("x"), 0.0), 0.0, _float_of(row.get("y"), 0.0))
+	var basis := body.basis
+	var aim: Variant = _aim_point(placed, row)
+	if aim is Vector3:
+		var to: Vector3 = aim - placed
+		to.y = 0.0
+		if to.length_squared() > 0.0004:
+			basis = Basis.looking_at(to, Vector3.UP)
+	body.transform = Transform3D(basis, placed)
+	body.force_update_transform()
+	if body.is_inside_tree():
+		PhysicsServer3D.body_set_state(body.get_rid(), PhysicsServer3D.BODY_STATE_TRANSFORM, body.global_transform)
+
+
+func _aim_point(origin: Vector3, row: Dictionary) -> Variant:
 	for point in _pairs(row.get("path", [])):
 		var world := Vector3(point.x, origin.y, point.y)
 		if origin.distance_squared_to(world) > 0.04:
-			aim = world
-			break
-	if aim == null:
-		var dest = _dest_point(row.get("dest", []))
-		if dest is Vector3 and origin.distance_squared_to(Vector3(dest.x, origin.y, dest.z)) > 0.04:
-			aim = Vector3(dest.x, origin.y, dest.z)
-	if aim is Vector3 and origin.distance_squared_to(aim) > 0.0004:
-		body.look_at(aim, Vector3.UP)
+			return world
+	var dest = _dest_point(row.get("dest", []))
+	if dest is Vector3:
+		var flat := Vector3(dest.x, origin.y, dest.z)
+		if origin.distance_squared_to(flat) > 0.04:
+			return flat
+	return null
+
+
+func _fit_job_labels() -> void:
+	if people.is_empty():
+		return
+	for body in people.values():
+		var label := body.get_node_or_null("JobLabel") as Label3D
+		if label == null:
+			continue
+		_fit_job_label(label, bool(body.get_meta("show_job", false)))
+
+
+func _fit_job_label(label: Label3D, selected: bool) -> void:
+	var ortho := _view_ortho()
+	# Screen size tracks the orthographic size: a fixed-pixel billboard stays
+	# huge while the person shrinks and ends up on the ring.
+	var fit := clampf(LABEL_REF_ORTHO / maxf(ortho, 1.0), 0.5, 1.15)
+	label.fixed_size = false
+	label.pixel_size = LABEL_REF_METERS * fit / float(LABEL_FONT)
+	label.font_size = LABEL_FONT
+	label.outline_size = 12
+	label.position = Vector3(0.0, LABEL_LIFT, 0.0)
+	label.visible = selected and ortho <= label_hide_above
+
+
+func _view_ortho() -> float:
+	var rig := get_node_or_null("../CameraRig")
+	if rig != null:
+		var cam := rig.get_node_or_null("Camera3D") as Camera3D
+		if cam != null and cam.projection == Camera3D.PROJECTION_ORTHOGONAL:
+			return cam.size
+		var stored = rig.get("ortho_size")
+		if stored is float or stored is int:
+			return float(stored)
+	return label_hide_above + 1.0
 
 
 func _kind_for(row: Dictionary) -> String:
@@ -449,7 +516,10 @@ func _make_person(index: int, generation: int) -> AnimatableBody3D:
 	body.name = "Person_%d_%d" % [index, generation]
 	body.collision_layer = LAYER_PERSON
 	body.collision_mask = 0
-	body.sync_to_physics = true
+	# Snapshot placement owns the transform. A physics sync writes a stale
+	# origin back over it. The transform notification still moves the shape,
+	# so picking keeps working.
+	body.sync_to_physics = false
 	body.set_meta("entity_kind", "person")
 	body.set_meta("index", index)
 	body.set_meta("generation", generation)
@@ -529,11 +599,12 @@ func _make_person(index: int, generation: int) -> AnimatableBody3D:
 
 	var label := Label3D.new()
 	label.name = "JobLabel"
-	label.position = Vector3(0.0, 2.15, 0.0)
+	label.position = Vector3(0.0, LABEL_LIFT, 0.0)
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	label.fixed_size = true
-	label.font_size = 32
-	label.outline_size = 10
+	label.fixed_size = false
+	label.pixel_size = LABEL_REF_METERS / float(LABEL_FONT)
+	label.font_size = LABEL_FONT
+	label.outline_size = 12
 	label.modulate = Color(0.97, 0.94, 0.86)
 	label.outline_modulate = Color(0.08, 0.05, 0.03)
 	label.no_depth_test = true
@@ -692,20 +763,23 @@ func _ensure_dest(key: String) -> Node3D:
 	marker.name = "Dest_%s" % key.replace(":", "_")
 	var post := MeshInstance3D.new()
 	var cyl := CylinderMesh.new()
-	cyl.top_radius = 0.07
-	cyl.bottom_radius = 0.07
-	cyl.height = 0.75
+	cyl.top_radius = 0.18
+	cyl.bottom_radius = 0.22
+	cyl.height = 1.15
 	post.mesh = cyl
-	post.position = Vector3(0.0, 0.38, 0.0)
+	post.position = Vector3(0.0, 0.58, 0.0)
 	post.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var marker_mat := _flat(_path_color(0), true)
+	post.material_override = marker_mat
 	marker.add_child(post)
 	var cap := MeshInstance3D.new()
 	var sphere := SphereMesh.new()
-	sphere.radius = 0.16
-	sphere.height = 0.32
+	sphere.radius = 0.32
+	sphere.height = 0.64
 	cap.mesh = sphere
-	cap.position = Vector3(0.0, 0.82, 0.0)
+	cap.position = Vector3(0.0, 1.28, 0.0)
 	cap.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	cap.material_override = marker_mat
 	marker.add_child(cap)
 	path_root.add_child(marker)
 	dest_markers[key] = marker
