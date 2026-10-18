@@ -23,6 +23,8 @@ esac
 cargo build --manifest-path "$root/rust/Cargo.toml" -p latchsoil-godot $cargo_flags
 
 mkdir -p "$root/godot/bin"
-ln -sf "$root/rust/target/$profile/liblatchsoil_godot.so" \
-       "$root/godot/bin/liblatchsoil_godot.so"
+# Relative, deliberately: the editor may open this project through a mount, and
+# an absolute symlink would resolve on the wrong machine and dangle.
+ln -sfn "../../rust/target/$profile/liblatchsoil_godot.so" \
+        "$root/godot/bin/liblatchsoil_godot.so"
 echo "build-extension: linked $profile library into godot/bin/"
