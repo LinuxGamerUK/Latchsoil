@@ -2,7 +2,7 @@
 
 Played: milestone 1b. The interface was frozen first (contract `a7f2464`), then built; the code and this note landed together.
 
-Where: **review frames rendered on the build host**, software Vulkan under Xvfb, and this time every picture was produced by driving the real sim with the sim's own rows printed beside it. **Nobody has played 1b with their hands yet.** The four frames are kept beside the project note in the vault; the repository carries the driver that reproduces them.
+Where: **review frames rendered on the build host**, software Vulkan under Xvfb, and every picture was produced by driving the real sim with the sim's own rows printed beside it. **A person has since played it by hand and the basics work**: placing a campfire, cooking a meal, hauling into a store and taking back out (2026-10-18). The four frames are kept beside the project note in the vault; the repository carries the driver that reproduces them.
 
 ## What the frames establish
 
@@ -23,4 +23,4 @@ Where: **review frames rendered on the build host**, software Vulkan under Xvfb,
 
 ## Owed
 
-A human session: place a campfire and cook a meal, haul into a store and take back out, and say whether the build wait reads as work or as a stall. What a person already has to judge from 1a — camera feel, the destination marker, the label over a neighbour — is still outstanding too.
+**Played by hand and passed for the basics** — place a campfire, cook, haul into a store, take back out. Still open, and only play answers it: whether a six-second build reads as work or as a stall. What a person already has to judge from 1a — camera feel, the destination marker, the label over a neighbour — is still outstanding too.
