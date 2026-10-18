@@ -7,6 +7,12 @@
 *.translation
 export_presets.cfg.bak
 
+# Compiled extension libraries: built into godot/bin/ and linked from rust/target
+*.so
+*.dylib
+*.dll
+godot/bin/
+
 # Build and export output
 /build/
 /export/

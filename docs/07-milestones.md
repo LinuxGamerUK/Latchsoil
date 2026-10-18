@@ -2,7 +2,7 @@
 
 Implement these in order. Each one ends in a commit. Do not start the next while the current acceptance check is failing. Placeholder art is part of finishing a milestone, not a later art pass that blocks the sim.
 
-The current milestone, as of the design commit, is **none**. Wait until Gavin asks for milestone 0.
+The current milestone, as of the design commit, is **none**. Milestone 0 is complete; milestone 1a is next, and starts when Gavin asks for it.
 
 ## Agent rules
 

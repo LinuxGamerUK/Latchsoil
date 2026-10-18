@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The mirror is public: standard runners are free here, and the job needs
+# nothing beyond reading the repo.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Headless checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Upstream Nix, with flakes and nix-command enabled by the action.
+      # GITHUB_TOKEN is the automatic token: it raises the GitHub API rate limit
+      # the flake evaluator runs into when it resolves nixpkgs.
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # A fresh runner substitutes the toolchain from cache.nixos.org on every
+      # run; this restores /nix (with its database) so it is not re-downloaded.
+      - name: Restore and save the Nix store
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+
+      # Without the link, the post-job garbage collection can drop Godot and
+      # rustc before they are cached. Do not add --no-link here.
+      - name: Realise the devshell
+        run: nix build .#devShells.x86_64-linux.default
+
+      # The crates come from crates.io, not from the Nix store.
+      - name: Cache the cargo registry and target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      # The workspace tests, then the headless Godot load: no engine in the
+      # first half, one tick of the sim in the second. A non-zero exit fails the
+      # job; there is no continue-on-error anywhere in this file.
+      - name: Headless checks
+        run: nix run .#test

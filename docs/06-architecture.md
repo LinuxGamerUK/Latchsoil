@@ -61,13 +61,11 @@ Two crates, one workspace. `latchsoil-sim` must not depend on gdext and must not
 
 ## Godot and Rust versions
 
-The flake pins **Godot 4.7.2** for the editor and the export templates, and a released `godot` crate (gdext) with its `api-4-7` feature target. Both ends of the toolchain are verified on 4.7.2, so there is no version split.
+The flake pins **Godot 4.7.2** for the editor and the export templates, and a released `godot` crate (gdext) with its `api-4-7` feature target. Both ends of the toolchain are verified on 4.7.2, so there is no version split. `flake.lock` and `Cargo.lock` are committed, and the devshell reports `4.7.2.stable.nixpkgs.ed1daf0bf`.
 
-Milestone 0 must prove a gdext library loads under Godot 4.7.2 and prints a sim tick headlessly. If the load genuinely fails, the pin drops to **4.6.3** at both ends — editor, export templates and the crate's API feature — and the change is recorded in [`00-decisions.md`](00-decisions.md), not in a commit message. No other version is supported.
+The binding builds from prebuilt 4.7 bindings: no editor binary is needed to compile the extension. Only export templates ever need the engine installed alongside cargo.
 
-Prefer a released `godot` crate. A git pin of gdext is allowed only when the 4.7 load requires it, and the commit should name the reason.
-
-Both `flake.lock` and `Cargo.lock` are committed.
+If a gdext load ever fails under 4.7.2, the pin drops to **4.6.3** at both ends — editor, export templates and the crate's API feature — and the change is recorded in [`00-decisions.md`](00-decisions.md). No other version is supported.
 
 ## What Rust owns
 
@@ -83,4 +81,4 @@ A `u64` seed plus the same command list produces the same sim state. Render inte
 
 ## Milestone 0 shape, when it is asked for
 
-The flake provides `godot` and `cargo`. `cargo test` runs the clock with no Godot process. Headless Godot loads the extension, prints one sim tick, and quits. The repository also gains its `.gitignore`, its licence, and `docs/09-bridge.md`. Details and acceptance text live in [07-milestones.md](07-milestones.md).
+The flake provides Godot and Cargo from one devshell, so the whole toolchain comes from a single pinned nixpkgs. `cargo test` runs the sim with no Godot process. `nix run .#test` then builds the extension, writes the one line Godot needs to find it, loads it headless, ticks the sim once and quits. The repository also carries its `.gitignore`, its licence, `docs/09-bridge.md`, and a CI workflow that runs the same checks on every push. Acceptance text lives in [07-milestones.md](07-milestones.md); what the build settled is in [00-decisions.md](00-decisions.md).

@@ -1,0 +1,15 @@
+[package]
+name = "latchsoil-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Engine-free Latchsoil simulation. No Godot types."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+warnings = "deny"

@@ -52,9 +52,20 @@ Six late outcomes exist as stubs, and each one is earned by a record rather than
 - **A new people is data, not a code branch.** Races, items, buildings, laws and events are RON files under `data/`.
 - **A milestone finishes with placeholder art.** A tinted blockout with the right silhouette beats a stall for a finished mesh.
 
+## Build and test
+
+The toolchain is one pinned devshell — Godot 4.7.2, Rust and Cargo — so nothing else has to be installed:
+
+```bash
+nix develop          # engine, cargo, rustc on PATH
+nix run .#test       # workspace tests, then the headless engine load
+```
+
+`nix run .#test` is the acceptance gate: it runs the sim's tests with no engine in the process, then builds the GDExtension, loads it in a headless Godot, ticks the sim once, checks the determinism fingerprint, and quits. The same command runs in CI on every push.
+
 ## Status
 
-Design charter only. Milestone 0 has not started. [`docs/07-milestones.md`](docs/07-milestones.md) is the build order, and [`docs/00-decisions.md`](docs/00-decisions.md) records what has been decided since.
+Milestone 0 (toolchain truth) is done: the devshell, the two-crate workspace, the headless engine load and the sim's own tests all run from one command. Milestone 1a is next — the camera, selection and the order path on a blockout field. [`docs/07-milestones.md`](docs/07-milestones.md) is the build order, and [`docs/00-decisions.md`](docs/00-decisions.md) records what has been decided since.
 
 ## The documents
 

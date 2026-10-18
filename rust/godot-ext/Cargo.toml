@@ -1,0 +1,13 @@
+[package]
+name = "latchsoil-godot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+godot.workspace = true
+latchsoil-sim = { path = "../sim" }
