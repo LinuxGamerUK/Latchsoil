@@ -43,7 +43,7 @@ These exist as stubs in milestone 7, after the political systems can produce the
 
 ## How the year presses
 
-Hunger should bite on day 2 if nobody finds food. Forage bridges a careful holding to the first harvest. A planted plot pays during Sprout, after 10 days of work. Four people need about four worked plots and a well. The headless sim locks that number with a test in milestone 3, and the test is allowed to adjust the exact yield until the pressure feels like that sentence.
+Hunger should bite on day 2 if nobody finds food. Forage bridges a careful holding to the first harvest. A planted plot pays about five days after planting, so a season can carry two crops. Four people need about four worked plots and a well. Four people eat eighty grain in a Sprout and four plots can pay twice that, so the margin belongs to seed, spoilage and the storehouse. The headless sim locks those sentences with a test in milestone 3, and the test is allowed to adjust the exact yield until the pressure feels like that paragraph.
 
 Glass chits are the only coin, and smelters eat them.
 

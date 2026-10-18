@@ -11,7 +11,7 @@ The current milestone, as of the design commit, is **none**. Wait until Gavin as
 - Add a headless check for every sim behavior you claim works.
 - Keep the change inside the milestone. A good idea for milestone 5 gets a line in this file, not a surprise system in milestone 1.
 - Do not import concept art as a runtime texture.
-- Camera feel is playtested on the Legion. This host owes headless proof.
+- Camera feel is playtested by hand and written up in `docs/playtests/`. This side of the project owes headless proof.
 
 ## 0 — Toolchain truth
 
@@ -19,23 +19,35 @@ Create the flake, the Godot project, and the Rust extension described in [06-arc
 
 Acceptance:
 
-- The flake shell provides Godot and Cargo.
+- The flake shell provides Godot and Cargo, and `flake.lock` is committed.
 - `cargo test` advances a clock with no Godot process.
 - Headless Godot loads the extension, prints a sim tick, and quits cleanly.
-- If Godot 4.7.2 will not load the extension, the flake pins Godot 4.6 and this file records that.
+- `docs/09-bridge.md` exists and names the command list, entity ids, state transfer and failure strings.
+- `.gitignore` exists; the repository has its licence and both remotes.
+- If Godot 4.7.2 will not load the extension, the flake pins Godot 4.6.3 and the choice is recorded in [00-decisions.md](00-decisions.md).
 
-## 1 — One field, one order
+## 1a — One field, one camera
 
 A temperate blockout. An isometric camera: WASD pan, wheel zoom, Q and E rotate by 90 degrees, Space pauses. Three Harth stand under the peg.
 
-The player can select them and order one to move, one to gather, and one to eat. Hunger, thirst, and health tick in Rust. They can gather fiber, wood, stone, and water. They can place a campfire, a lean-to, and a stockpile. A colonist's job can craft a bandage, a meal, and a stone knife.
+The player can select people, and order the selection to move, gather, or eat. Job state ticks in Rust; Godot draws a ground ring, an order path, a destination marker, and one line of failure reason.
+
+Acceptance:
+
+- A headless scenario issues move, gather and eat orders and asserts the sim state changed as ordered (position, carried goods, hunger).
+- A headless order that cannot be satisfied writes the reason string, and the test names each reason it covers.
+- On a real machine, selection, the order path, and the failure line are readable at holding zoom. Write the note in `docs/playtests/`.
+
+## 1b — One holding, one save
+
+Hunger, thirst and health tick in Rust. People gather fiber, wood, stone and water, and gathering depletes a node. The player can place a campfire, a lean-to and a stockpile. A colonist's job can craft a bandage, a meal, and a stone knife. Save and load.
 
 Acceptance:
 
 - A headless scenario applies hunger and asserts health falls only after the hunger threshold.
 - Gathering depletes a node.
-- Save and load restores needs, positions, jobs, and the camera.
-- On the Legion, selection, the order path, and a one-line failure reason are readable. Write the note in `docs/playtests/`.
+- Save, load, and compare: needs, positions, jobs, inventory, tick count, and RNG stream state survive the round trip with an equal state hash. A second run from the same seed and command list matches it.
+- The camera is not in the save.
 
 ## 2 — The body keeps score
 
@@ -53,10 +65,10 @@ Colonist records, work priorities, and persistent orders. Buildings: house, farm
 
 Acceptance, headless, same seed and same starting Harth:
 
-- Four people, four worked plots, and a well survive 10 days.
+- Four people, four worked plots, and a well survive 10 days, with grain left over after spoilage and seed.
 - The same run with no well fails.
 - The same run with plots and forage disabled fails from hunger before the harvest pays.
-- Adjust yields in data until those three outcomes hold. Record the constants next to the test.
+- Adjust yields in data until those three outcomes hold, and record the constants next to the test. A crop takes about five days, so a plot pays twice in a Sprout; four plots must beat four people's eighty grain with margin, not break even.
 
 ## 4 — A seed
 
@@ -91,7 +103,7 @@ Acceptance:
 
 ## 7 — The rest of the peoples
 
-The remaining peoples arrive as data, start packages, and stand-in silhouettes. Add the event deck, weapon familiarity, and stubs for the six endings in the lore doc. Grow the map past 512 m only after the 512 m loop is fun on the Legion.
+The remaining peoples arrive as data, start packages, and stand-in silhouettes. Add the event deck, weapon familiarity, and stubs for the six endings in the lore doc. Grow the map past 512 m only after the 512 m loop is fun.
 
 Acceptance:
 
@@ -105,4 +117,4 @@ Other planets, flight, multiplayer, voice acting, a scripted campaign, mods beyo
 
 ## Kickoff, when Gavin asks for milestone 0
 
-Work in `/home/gav/Projects/Project-Game-Dev`. Read the docs in the order the README gives. Implement milestone 0 only. Prove the headless load. Commit that milestone. Stop.
+Work in the repository root. Read the docs in the order the README gives. Implement milestone 0 only. Prove the headless load. Commit that milestone. Stop.

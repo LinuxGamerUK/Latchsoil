@@ -7,7 +7,7 @@ This repository is the charter until milestone 0. Do not add `flake.nix`, `godot
 ## Target tree
 
 ```
-Project-Game-Dev/
+Latchsoil/
   flake.nix
   docs/
   data/
@@ -23,11 +23,9 @@ Project-Game-Dev/
     assets/
     ui/
   rust/
-    Cargo.toml
-    src/
-      lib.rs
-      bridge/
-      sim/
+    Cargo.toml            workspace
+    sim/                  latchsoil-sim — no Godot types, plain cargo test
+      src/
         clock.rs
         needs.rs
         skills.rs
@@ -38,27 +36,38 @@ Project-Game-Dev/
         combat.rs
         save.rs
         worldgen/
-  tests/
+    godot-ext/            latchsoil-godot — the gdext cdylib and the bridge
+      src/
+        lib.rs
+        bridge/
 ```
 
-`lib.rs` is the gdext entry. `bridge/` is thin Godot nodes that hold entity ids and push input into the sim. `sim/` has no Godot types if a split can keep them out. `tests/` runs scenarios with no window.
+Two crates, one workspace. `latchsoil-sim` must not depend on gdext and must not name a Godot type — that is what makes "the rules are not in GDScript" true in the dependency graph instead of in a promise. `latchsoil-godot` holds the gdext entry point and a thin `bridge/`: Godot nodes that own entity ids and push input into the sim.
 
 ## Rules that keep the sim honest
 
 - The sim ticks at 10 Hz. Render runs at whatever the machine holds. Input applies on the next tick.
 - 1 unit is 1 meter. The build grid is 1 meter.
-- Saves are versioned JSON through the early milestones, so a failing run can be opened in an editor. A Godot scene is not a save.
+- Nothing in `sim/` iterates a `HashMap`. Fixed iteration order only, or a run stops being reproducible.
+- Saves are versioned JSON through the early milestones, so a failing run can be opened in an editor. The save carries `save_version`, the tick count, and the RNG stream state; without the stream state a load cannot reproduce the run. A migration test guards the version. A Godot scene is not a save.
+- The camera is Godot-owned view state and is not part of a save. Where the player was looking is a local preference.
 - Pathfinding lives on the Rust grid, so a headless test and the running game agree.
-- Races, items, buildings, laws, and events are RON files under `data/`. Comments are part of the format. A new people is numbers, text, a mesh, and a starting kit.
-- Headless checks run on this NixOS host. Camera feel is a Legion playtest written up in a short note under `docs/playtests/`. Do not treat a missing screenshot on this host as a failed milestone.
+- Races, items, buildings, laws, and events are RON files under `data/`. Comments are part of the format. A new people is numbers, text, an art key, and a starting kit — not a branch in the simulation.
+- Headless checks run in the devshell (and in CI). Camera feel is a playtest written up in a short note under `docs/playtests/`. Do not treat a missing screenshot as a failed milestone.
+
+## The bridge
+
+[`docs/09-bridge.md`](09-bridge.md) defines the whole Godot↔Rust surface: the command list, entity id allocation, how sim state reaches a frame (snapshot or delta), how a tick aligns to a frame, and which side computes the one-line failure reason (`hungry`, `no path`, `no material`, `no skill`, `afraid`, `night`, `wounded`). It is a milestone 0 deliverable, because milestone 1 cannot be written without it.
 
 ## Godot and Rust versions
 
-Nixpkgs on this machine provides Godot 4.7.2 and Rust 1.98.1. godot-rust's stable API target at the time of this charter is 4.6.
+The flake pins **Godot 4.7.2** for the editor and the export templates, and a released `godot` crate (gdext) with its `api-4-7` feature target. Both ends of the toolchain are verified on 4.7.2, so there is no version split.
 
-Milestone 0 must prove a gdext library loads under Godot 4.7.2. If it does not, pin Godot 4.6 in the flake and stay there. Record the choice in `docs/06-architecture.md` rather than leaving it as a guess in a commit message.
+Milestone 0 must prove a gdext library loads under Godot 4.7.2 and prints a sim tick headlessly. If the load genuinely fails, the pin drops to **4.6.3** at both ends — editor, export templates and the crate's API feature — and the change is recorded in [`00-decisions.md`](00-decisions.md), not in a commit message. No other version is supported.
 
-Prefer a released godot crate. A git pin of gdext is allowed only when the 4.7 load requires it, and the commit should name the reason.
+Prefer a released `godot` crate. A git pin of gdext is allowed only when the 4.7 load requires it, and the commit should name the reason.
+
+Both `flake.lock` and `Cargo.lock` are committed.
 
 ## What Rust owns
 
@@ -74,4 +83,4 @@ A `u64` seed plus the same command list produces the same sim state. Render inte
 
 ## Milestone 0 shape, when it is asked for
 
-The flake provides `godot` and `cargo`. `cargo test` runs the clock with no Godot process. Headless Godot loads the extension, prints one sim tick, and quits. Details and acceptance text live in [07-milestones.md](07-milestones.md).
+The flake provides `godot` and `cargo`. `cargo test` runs the clock with no Godot process. Headless Godot loads the extension, prints one sim tick, and quits. The repository also gains its `.gitignore`, its licence, and `docs/09-bridge.md`. Details and acceptance text live in [07-milestones.md](07-milestones.md).

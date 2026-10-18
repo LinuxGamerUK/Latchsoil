@@ -8,6 +8,8 @@ WASD pans across the holding. The mouse wheel zooms between a close isometric an
 
 Left click and drag select people, buildings, and stockpiles. Right click orders the selection: move, haul, work, attack. Priorities run the holding while the camera is elsewhere.
 
+The camera is view state, not save state. Where the player was looking is a local preference; it never travels with a save.
+
 Drafting is the RTS posture. A drafted person holds, follows a move order, and fights until released. An undrafted person who is attacked defends at a penalty and then runs.
 
 Every person can die, including the founder. There is no body to inhabit.
@@ -33,13 +35,14 @@ Target pressure for the first balancing pass:
 
 - A person eats 2 meals a day.
 - A meal is 1 grain plus fuel, or 2 forage units.
-- A worked 4×4 plot yields about 20 grain in a Sprout.
+- A worked 4×4 plot yields about 20 grain per crop, and a crop takes about 5 days, so a plot can pay twice in a 10-day season.
+- Four people eat 80 grain in a Sprout; four plots can pay about 160. The difference is seed, spoilage and the storehouse.
 - Four people want four plots and a well.
 - With no food effort, hunger is serious on day 2.
 - Forage can bridge a careful group to the first harvest, and it is capped so it cannot replace fields.
 - Spoilage makes a storehouse part of the food chain.
 
-Milestone 3's headless test is allowed to change the exact constants until those sentences are true. The sentences stay.
+Milestone 3's headless test is allowed to change the exact constants until those sentences are true. The sentences stay, and the stack must leave surplus rather than break even.
 
 ## Skills
 

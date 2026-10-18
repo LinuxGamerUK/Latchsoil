@@ -1,0 +1,23 @@
+# Rust
+/target/
+**/target/
+
+# Godot
+.godot/
+*.translation
+export_presets.cfg.bak
+
+# Build and export output
+/build/
+/export/
+/dist/
+
+# Nix
+result
+result-*
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
