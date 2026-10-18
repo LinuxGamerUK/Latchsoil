@@ -50,7 +50,7 @@ So the eye can sort the map before the UI does:
 - Selected people carry a ground ring and a job icon.
 - A drafted person reads differently from a working person at holding zoom.
 - An order shows a path and a destination marker until the job ends or fails.
-- A failed job says why, in one line: hungry, no path, no station, no skill, no material, afraid, night.
+- A failed job says why, in one line: hungry, no path, no station, no skill, no material, afraid, night, tired.
 - Two peoples standing together are distinguishable with the color and the silhouette alone, even before faces exist.
 
 ## How an asset gets made

@@ -211,3 +211,37 @@ Take { actor: EntityId, item: ItemId, from: EntityId },
 **Rules implemented after 1b:** `Move`, `Gather`, `Eat`, `Place`, `Craft`, `Haul`, `Take`. `Work`, `Draft` and `Attack` remain accepted and inert; their rules arrive with the milestones that name them.
 
 **Reasons 1b can produce:** the five from 1a plus `no station`. `no skill` and `afraid` still have no rule, so nothing returns them.
+
+## Milestone 2 — what the rules add
+
+This section narrows the contract above for milestone 2: six body regions and the wounds on them, bleeding, infection, warmth, fatigue and sleep, and skills that rise from doing the work. It does not extend the contract except where it names a recorded decision, and it finally gives two values that have existed since milestone 0 a rule: `JobKind::Heal` and `FailureReason::NoSkill`.
+
+**Charter changes, all in [00-decisions.md](00-decisions.md).** `Command::Heal` joins the enum, because healing names a target and `Work` has nowhere to put one. `JobKind::Rest` joins the closed job list, because sleeping has to report as something. `FailureReason::Tired = 8`, string `tired`, because an exhausted worker must say why they stopped. One new item, `salve` (8), and one new recipe, `salve` (3).
+
+**The six regions.** `RegionKind`, from 0: Head, Torso, LeftArm, RightArm, LeftLeg, RightLeg. Every person has exactly six, in that order, each with `health` (1.0 whole), `bleeding`, `infected` (both 0.0 to 1.0) and two flags, `bandaged` and `treated`. A person's own `health` is still what kills them; regions record where the hurt is. **No rule in this milestone wounds anybody.** Attacks arrive with milestone 5, so wounds are applied by tests and carried by saves, and this section is about the rules that bleed, infect, treat and heal them.
+
+**Bleeding.** A region with `bleeding` above zero drains the person's health at `BLEED_HEALTH_PER_TICK = 1/7200` per unit of bleeding, so a wound at 1.0 empties a healthy person in one day. Bleeding does not fade on its own: a bandage stops it. Several bleeding regions add up.
+
+**A bandage stops the bleeding.** `Heal { actor, target, item }` walks the actor to `target`, spends `HEAL_TICKS = 60` ticks within `STATION_RANGE_M` of them, consumes one carried `item`, and applies it. The target may be the actor. A `bandage` sets `bandaged` on the worst bleeding region, which is the one with the highest `bleeding`, and sets its `bleeding` to 0.0. `Heal` on a person with nothing bleeding and nothing infected fails with `no material`. An item that is neither a bandage nor a salve fails with `no material`. A missing healer skill is not a refusal to bandage: bandaging needs none.
+
+**Infection.** A wound nobody bandaged accumulates `infected` at `INFECTION_PER_TICK = 1/28800`, so a neglected wound is at 0.5 in four days. A bandaged wound accumulates at a tenth of that. At `infected` at or above `INFECTION_SICK = 0.5` the person's health drains at `INFECTION_HEALTH_PER_TICK = 1/14400`, and the person refuses work with `wounded` — the same reason that already covers low health, because it is the same complaint.
+
+**A salve slows it.** A `salve` applied with `Heal` reduces the worst infected region's `infected` by `SALVE_INFECTION_CUT = 0.5`, sets `treated`, and halves the rate at which that region accumulates infection from then on. A salve requires `medicine` skill at or above `MEDICINE_SKILL_MIN = 0.25`; below it the order fails with `no skill`, which is the first rule in the project to produce that string.
+
+**Warmth.** Every person gains `warmth`, 0.0 to 1.0, starting at 1.0. The world's target warmth is `AMBIENT_WARMTH_DAY = 0.9` outside the night range and `AMBIENT_WARMTH_NIGHT = 0.35` inside it, and a person's warmth moves toward that target by `WARMTH_DRIFT_PER_TICK = 1/2400` each tick. A **finished** campfire within `WARMTH_RANGE_M = 3.0` raises the target to 1.0, which is the campfire's second job. At `warmth == 0.0` health drains at `COLD_HEALTH_PER_TICK = 1/7200`, so a night in the open away from a fire is a real cost and a fire is a real answer.
+
+**Fatigue and sleep.** Every person gains `fatigue`, 0.0 fresh to 1.0 exhausted, rising at `FATIGUE_PER_TICK = 1/28800` while idle and `FATIGUE_WORK_MULTIPLIER = 3.0` times that while walking or working — a full day of work is about 0.75. Work is refused above `FATIGUE_REFUSAL = 0.85` with `tired`. `Work { actor, job: Rest }` sleeps where the person stands, recovering `SLEEP_RECOVER_PER_TICK = 1/2400` each tick, and twice that within `STATION_RANGE_M` of a finished lean-to. The order completes when fatigue reaches 0.0. The sim does not send anybody to bed on its own: the player does, and this file records the change if that ever stops being true.
+
+**Skills.** Four, in fixed order: `gather`, `build`, `craft`, `medicine`, each 0.0 to 1.0, starting at 0.0. Doing the work raises the one that matches: `SKILL_PER_UNIT = 0.01` per gathered unit, per finished building, per crafted item, and per completed heal. A skill cuts the time its own work takes by `SKILL_TIME_RELIEF = 0.4`, so at 1.0 the job takes 60 percent of its listed ticks. A carried `knife` cuts gathering time by a further `GATHER_TOOL_RELIEF = 0.25`: that is the tool rule, and it applies whether or not the knife was made by this person.
+
+**One new item and one new recipe.** `ITEM_SALVE = ItemId(8)`, `RECIPE_SALVE = RecipeId(3)`: one fiber and one water, at a campfire, `RECIPE_SALVE_TICKS = 40`, no tool, and `medicine` skill at or above `MEDICINE_SKILL_MIN` or the order fails with `no skill`.
+
+**The snapshot gains** `fatigue`, `warmth` and a `skills` array of four values in the fixed order above on every person, plus `regions`: six entries in `RegionKind` order, each `{kind, health, bleeding, infected, bandaged, treated}`. Nothing existing is renamed, reordered or removed.
+
+**The save.** `save_version` becomes 3, carrying regions and their wounds, fatigue, warmth and skills, alongside everything it already carried. A version 2 save is `MigrationNotImplemented`: still nothing has shipped, so still no migration.
+
+**Constants, each beside the test that names it:** `BLEED_HEALTH_PER_TICK` 1/7200, `HEAL_TICKS` 60, `INFECTION_PER_TICK` 1/28800, `INFECTION_SICK` 0.5, `INFECTION_HEALTH_PER_TICK` 1/14400, `SALVE_INFECTION_CUT` 0.5, `MEDICINE_SKILL_MIN` 0.25, `AMBIENT_WARMTH_DAY` 0.9, `AMBIENT_WARMTH_NIGHT` 0.35, `WARMTH_DRIFT_PER_TICK` 1/2400, `WARMTH_RANGE_M` 3.0, `COLD_HEALTH_PER_TICK` 1/7200, `FATIGUE_PER_TICK` 1/28800, `FATIGUE_WORK_MULTIPLIER` 3.0, `FATIGUE_REFUSAL` 0.85, `SLEEP_RECOVER_PER_TICK` 1/2400, `SKILL_PER_UNIT` 0.01, `SKILL_TIME_RELIEF` 0.4, `GATHER_TOOL_RELIEF` 0.25.
+
+**Rules implemented after 2:** `Move`, `Gather`, `Eat`, `Place`, `Craft`, `Haul`, `Take`, `Work` for `JobKind::Rest` only, `Heal`. `Work` for the other six job kinds, `Draft` and `Attack` remain accepted and inert.
+
+**Reasons 2 can produce:** all of 1b's, plus `tired`, and `no skill` for the first time. `afraid` still has no rule, and nothing returns it.

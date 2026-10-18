@@ -49,3 +49,13 @@ What the build settled, so nobody rediscovers it:
 4. **`save_version` becomes 2, with no migration.** Nothing has shipped, so a version 1 save is refused rather than half-read. The save gains buildings, their progress and the contents of every stockpile.
 5. **The bandage heals nothing in 1b.** Wounds are milestone 2. The item exists so the lean-to has a reason and the fiber has a use; its rule does not exist yet, and no test may claim otherwise.
 6. **A recipe's station is a distance, not a room.** `STATION_RANGE_M = 2.0` keeps 1b free of interior spaces while still making placement matter. Interiors, if they ever exist, are a later milestone.
+
+## 2026-10-18 — milestone 2 interface
+
+1. **`Command::Heal { actor, target, item }` joins the enum.** Healing names who is being treated, and `Work { actor, job }` has nowhere to put a target. Self-treatment is allowed — one person alone on a holding has to be able to bandage their own arm, and forbidding it would make a wound unsurvivable rather than interesting.
+2. **`JobKind::Rest` joins the closed job list.** `Work { actor, job: Rest }` is how a person sleeps, and sleeping has to report as something; reusing an existing kind would put a lie in the HUD's job line.
+3. **`FailureReason::Tired = 8`.** An exhausted worker stops, and the one line the HUD prints has to say why. The alternative is a player watching a person slow down and guessing at the cause.
+4. **`no skill` finally has a rule, and it guards medicine only.** A salve needs `medicine` skill at 0.25; bandaging needs nothing, because a bandage is cloth and a wound anyone can tie. Gating the cheap treatment behind a skill would make the acceptance line ('a wound stabilises with one') a lottery.
+5. **Nothing wounds anybody in this milestone.** Attacks are milestone 5, so wounds arrive in tests and saves; milestone 2 is the set of rules that bleed, infect, treat and heal them. Any test that wounds a person sets the wound explicitly and says so.
+6. **Warmth drifts toward an ambient target rather than tracking a temperature in degrees.** The sim has no thermometer and the fiction does not need one: what matters is that night is a cost, a campfire is an answer, and both are readable from one number.
+7. **`save_version` becomes 3, still with no migration.** Second milestone in a row with nothing shipped; the refusal stays honest rather than offering a half-read.
