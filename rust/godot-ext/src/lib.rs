@@ -248,6 +248,21 @@ impl SimHost {
             .submit_take(actor_index, actor_gen, item_id, from_index, from_gen)
     }
 
+    /// Queue a heal. Same codes as the other submits: 0 queued, 1 malformed,
+    /// 2 stale, 3 queue full. The sim writes the reject line; this method does not.
+    #[func]
+    fn submit_heal(
+        &mut self,
+        actor_index: i64,
+        actor_gen: i64,
+        target_index: i64,
+        target_gen: i64,
+        item_id: i64,
+    ) -> i64 {
+        self.sim
+            .submit_heal(actor_index, actor_gen, target_index, target_gen, item_id)
+    }
+
     /// Force a full copy. An unknown owner gets error 2 and empty arrays.
     #[func]
     fn snapshot(&mut self, owner: i64) -> VarDictionary {

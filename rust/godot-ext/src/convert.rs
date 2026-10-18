@@ -4,7 +4,9 @@
 //! memory: the caller owns the copy once the function returns.
 
 use godot::prelude::*;
-use latchsoil_sim::{BuildingView, Catalog, NodeView, PersonView, Rejections, Snapshot};
+use latchsoil_sim::{
+    BuildingView, Catalog, NodeView, PersonView, RegionView, Rejections, Snapshot,
+};
 
 /// 16 lowercase hex digits. A Godot int is i64, so the u64 hash must not cross
 /// as a number.
@@ -59,6 +61,27 @@ fn people_array(people: &[PersonView]) -> VarArray {
         row.set("path", &packed_path(&person.path));
         row.set("dest", &floats_array(&person.dest));
         row.set("target", &uints_array(&person.target));
+        row.set("fatigue", f64::from(person.fatigue));
+        row.set("warmth", f64::from(person.warmth));
+        // Sim order, unchanged: gather, build, craft, medicine.
+        row.set("skills", &floats_array(&person.skills));
+        // Sim order, unchanged: Head, Torso, LeftArm, RightArm, LeftLeg, RightLeg.
+        row.set("regions", &regions_array(&person.regions));
+        array.push(&row.to_variant());
+    }
+    array
+}
+
+fn regions_array(regions: &[RegionView]) -> VarArray {
+    let mut array = VarArray::new();
+    for region in regions {
+        let mut row = VarDictionary::new();
+        row.set("kind", i64::from(region.kind));
+        row.set("health", f64::from(region.health));
+        row.set("bleeding", f64::from(region.bleeding));
+        row.set("infected", f64::from(region.infected));
+        row.set("bandaged", region.bandaged);
+        row.set("treated", region.treated);
         array.push(&row.to_variant());
     }
     array

@@ -25,6 +25,14 @@ pub struct PersonView {
     pub dest: Vec<f32>,
     /// `[index, generation]` when the order names another entity, otherwise empty.
     pub target: Vec<u32>,
+    /// 0.0 fresh, 1.0 exhausted.
+    pub fatigue: f32,
+    /// 0.0 cold, 1.0 warm.
+    pub warmth: f32,
+    /// Fixed order: gather, build, craft, medicine. Each 0.0 to 1.0.
+    pub skills: [f32; 4],
+    /// Six body regions, in [`crate::command::RegionKind`] order.
+    pub regions: Vec<RegionView>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,6 +76,18 @@ pub struct Snapshot {
     pub full: bool,
     /// 0 on a good pull. 2 for an unknown owner.
     pub error: i32,
+}
+
+/// One body region, as last copied out of the sim.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegionView {
+    /// [`crate::command::RegionKind`] discriminant, from 0.
+    pub kind: u32,
+    pub health: f32,
+    pub bleeding: f32,
+    pub infected: f32,
+    pub bandaged: bool,
+    pub treated: bool,
 }
 
 /// Counters behind `rejections`. Code 0 (queued) is not a rejection.

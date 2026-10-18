@@ -64,6 +64,10 @@ Acceptance:
 - Infection advances on a neglected wound and slows when medicine is applied.
 - Doing the same job repeatedly raises that skill and changes the time the job takes.
 
+**Done, 2026-10-18 (contract `bc32467`).** The gate is `nix run .#test`: 65 sim tests, the milestone 0 smoke line, then `scripts/check-1a.sh`, `scripts/check-1b.sh` and `scripts/check-2.sh` — 33 checks in all, 15 of them new here. Every acceptance line above has a check behind it, and the new ones are: a wound that bleeds out without a bandage and holds with one; a neglected wound reaching the sickness line while a bandaged one takes ten times as long; a salve cutting the infection, and a salve from a hand below 0.25 medicine failing `no skill`, which is the first rule in the project to produce that string; a person past the sickness line unable to treat themselves and the salve left unspent; `tired` refusing work and `Rest` clearing it twice as fast beside a lean-to; warmth falling to zero in the open at night with health following it, while a lean-to settles at 0.6 and a campfire at 1.0; a job's skill rising with repetition and its time falling, with a carried knife cutting gathering further; and a version 3 save round-tripping regions, wounds, fatigue, warmth and skills to an equal state hash, with a version 2 save refused.
+
+Two things this milestone settled by arithmetic rather than taste, both recorded in the contract with their numbers: a night in the open costs about a tenth of a person's health (measured: night begins at tick 5760, warmth reaches zero at 6841, health 1.0 to 0.9003 against a predicted 0.09972), and the first draft of that rule could never fire at all. Review frames and what a person still has to judge: `docs/playtests/2026-10-18-2-wounds-and-cold.md`.
+
 ## 3 — A holding
 
 Colonist records, work priorities, and persistent orders. Buildings: house, farm plot, well, workshop, store, palisade.

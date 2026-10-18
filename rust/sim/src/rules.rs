@@ -107,6 +107,102 @@ pub const RECIPE_MEAL_TICKS: u32 = 30;
 /// Ticks to craft a bandage. Needs a finished lean-to and a carried knife.
 pub const RECIPE_BANDAGE_TICKS: u32 = 40;
 
+/// Health lost each tick per unit of bleeding, summed across regions. A wound at
+/// 1.0 empties a healthy person in one day. Bleeding does not fade on its own.
+pub const BLEED_HEALTH_PER_TICK: f32 = 1.0 / (TICKS_PER_DAY as f32);
+
+/// Ticks stood within station range before a heal consumes its item.
+pub const HEAL_TICKS: u32 = 60;
+
+/// Infection gained each tick by a wound nobody bandaged.
+///
+/// The checklist names 1/28800. That reaches [`INFECTION_SICK`] in two days and
+/// 1.0 in four. The sentence "at 0.5 in four days" does not match this constant;
+/// the constant is what the rules use.
+pub const INFECTION_PER_TICK: f32 = 1.0 / 28_800.0;
+
+/// Infected at or above this makes the person sick: health drains, and work is
+/// refused with `wounded`.
+pub const INFECTION_SICK: f32 = 0.5;
+
+/// Health lost each tick while any region is at or above [`INFECTION_SICK`].
+/// Once per person, not once per region.
+pub const INFECTION_HEALTH_PER_TICK: f32 = 1.0 / 14_400.0;
+
+/// Infection removed by one salve, before the 0.0 clamp.
+pub const SALVE_INFECTION_CUT: f32 = 0.5;
+
+/// Medicine skill a salve needs, at Heal and at the salve recipe. Below this the
+/// order fails with `no skill`. Bandaging needs none.
+pub const MEDICINE_SKILL_MIN: f32 = 0.25;
+
+/// Warmth the world pulls a person toward outside the night range.
+pub const AMBIENT_WARMTH_DAY: f32 = 0.9;
+
+/// Warmth the world pulls a person toward inside the night range, in the open.
+pub const AMBIENT_WARMTH_NIGHT: f32 = 0.0;
+
+/// Night target within [`STATION_RANGE_M`] of a finished lean-to. Shelter, not a fire.
+pub const LEANTO_WARMTH: f32 = 0.6;
+
+/// Warmth moved toward the ambient target each tick, without overshooting it.
+/// From day ambient, an open night reaches 0 in about three quarters of the night.
+pub const WARMTH_DRIFT_PER_TICK: f32 = 1.0 / 1_200.0;
+
+/// A finished campfire within this distance raises the warmth target to 1.0.
+pub const WARMTH_RANGE_M: f32 = 3.0;
+
+/// Health lost each tick while warmth is at or below 0. Drift runs after this check,
+/// so a tick that starts at 0 pays the cost and then leaves 0 if the target is higher.
+/// The ticks an open night spends at 0 cost about a tenth of health.
+pub const COLD_HEALTH_PER_TICK: f32 = 1.0 / 3_600.0;
+
+/// Fatigue gained each tick while idle. Walking or working multiplies it.
+pub const FATIGUE_PER_TICK: f32 = 1.0 / 28_800.0;
+
+/// Idle fatigue, times this, while walking or working. A full day of work is 0.75.
+pub const FATIGUE_WORK_MULTIPLIER: f32 = 3.0;
+
+/// Work is refused when fatigue is strictly above this, with `tired`.
+pub const FATIGUE_REFUSAL: f32 = 0.85;
+
+/// Fatigue cleared each tick of `Work { job: Rest }`. Twice this beside a finished lean-to.
+pub const SLEEP_RECOVER_PER_TICK: f32 = 1.0 / 2_400.0;
+
+/// Skill gained per gathered unit, finished building, crafted item, or completed heal.
+/// Capped at 1.0.
+pub const SKILL_PER_UNIT: f32 = 0.01;
+
+/// Fraction of listed ticks a skill at 1.0 removes. The job then takes 60 percent.
+pub const SKILL_TIME_RELIEF: f32 = 0.4;
+
+/// Further fraction removed from gathering time when a knife is carried.
+/// Applied to the skill-adjusted time, not added to the skill fraction.
+pub const GATHER_TOOL_RELIEF: f32 = 0.25;
+
+/// Ticks to craft a salve. Needs a finished campfire and medicine skill.
+pub const RECIPE_SALVE_TICKS: u32 = 40;
+
+/// `skills` array order on a person: gather, build, craft, medicine.
+pub const SKILL_GATHER: usize = 0;
+pub const SKILL_BUILD: usize = 1;
+pub const SKILL_CRAFT: usize = 2;
+pub const SKILL_MEDICINE: usize = 3;
+pub const SKILL_COUNT: usize = 4;
+
+/// Listed work ticks after skill and tool relief.
+///
+/// `skill` (0.0 to 1.0) keeps `1 - skill * SKILL_TIME_RELIEF` of `listed`.
+/// `extra_relief` cuts that result again by the same kind of fraction: a carried
+/// knife passes [`GATHER_TOOL_RELIEF`], and other jobs pass 0. Rounded to the
+/// nearest tick, and at least 1 so a job cannot finish before it has been worked.
+pub fn scaled_work_ticks(listed: u32, skill: f32, extra_relief: f32) -> u32 {
+    let skill_keep = 1.0 - skill.clamp(0.0, 1.0) * SKILL_TIME_RELIEF;
+    let tool_keep = 1.0 - extra_relief.clamp(0.0, 0.99);
+    let ticks = (listed as f32 * skill_keep * tool_keep).round() as u32;
+    ticks.max(1)
+}
+
 /// A node cell centre must be at least this far from the peg.
 pub const NODE_MIN_FROM_PEG: f32 = 4.0;
 

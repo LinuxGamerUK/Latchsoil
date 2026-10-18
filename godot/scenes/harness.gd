@@ -17,7 +17,8 @@ extends Node
 # The line is the snapshot's failure_text. This scene does not keep a second
 # wording and does not map a discriminant to a string of its own.
 #
-# Reasons 2 covers, by name: "no skill" and "tired". The line is still the
+# Reasons 2 covers, by name: "no skill", "tired", and "wounded" when a person
+# at the sickness line tries to treat themselves. The line is still the
 # snapshot's failure_text. A wound is set by editing the save and loading it
 # back: no rule wounds anybody until milestone 5, so the check says so.
 
@@ -67,16 +68,22 @@ const INFECTION_SICK := 0.5
 const INFECTION_HEALTH_PER_TICK := 1.0 / 14400.0
 const SALVE_INFECTION_CUT := 0.5
 const MEDICINE_SKILL_MIN := 0.25
-const AMBIENT_WARMTH_NIGHT := 0.35
-const WARMTH_DRIFT_PER_TICK := 1.0 / 2400.0
+const AMBIENT_WARMTH_DAY := 0.9
+const AMBIENT_WARMTH_NIGHT := 0.0
+const LEANTO_WARMTH := 0.6
+# Drift raised, drain reduced, so the rule fires in ordinary play: 0.9 of
+# warmth falls to zero in 1080 ticks, inside a 1440-tick night, and the last
+# 360 ticks cost about 0.10 health. Do not put 1/2400 and 1/7200 back.
+const WARMTH_DRIFT_PER_TICK := 1.0 / 1200.0
 const WARMTH_RANGE_M := 3.0
-const COLD_HEALTH_PER_TICK := 1.0 / 7200.0
+const COLD_HEALTH_PER_TICK := 1.0 / 3600.0
 const FATIGUE_REFUSAL := 0.85
 const SLEEP_RECOVER_PER_TICK := 1.0 / 2400.0
 const SKILL_PER_UNIT := 0.01
 const SKILL_TIME_RELIEF := 0.4
 const GATHER_TICKS_PER_UNIT := 20
 const NIGHT_START := 5760
+const TICKS_PER_DAY := 7200
 const JOB_HAUL := 0
 const JOB_REST := 7
 const LEAN_TO := 1
@@ -1708,6 +1715,9 @@ func run_milestone_2() -> void:
 	run_salve()
 	if failed:
 		return
+	run_self_heal_refused()
+	if failed:
+		return
 	run_tired()
 	if failed:
 		return
@@ -2310,7 +2320,11 @@ func run_no_skill() -> void:
 		return
 	if require_catalog_item("no-skill", "salve", ITEM_SALVE) < 0:
 		return
-	if not hand_wound("no-skill", 0.1, INFECTION_SICK):
+	# 0.3, comfortably below INFECTION_SICK. Heal is labour, and a person at or
+	# above the sickness line is refused with wounded, so the actor never
+	# reaches the salve's skill gate. This check is that gate, not being sick.
+	# Do not put the wound back on the line.
+	if not hand_wound("no-skill", 0.1, 0.3):
 		return
 	if not set_medicine("no-skill", MEDICINE_SKILL_MIN - 0.01):
 		return
@@ -2352,12 +2366,23 @@ func run_salve() -> void:
 		return
 	if require_catalog_item("salve", "salve", ITEM_SALVE) < 0:
 		return
-	if not hand_wound("salve", 0.1, INFECTION_SICK):
+	# 0.3, comfortably below INFECTION_SICK, so the actor is well enough to
+	# treat themselves. This check is the salve's cut, not being sick. Do not
+	# put the wound back on the line: 0.3 minus the cut clamps to 0.
+	if not hand_wound("salve", 0.1, 0.3):
 		return
 	if not set_medicine("salve", MEDICINE_SKILL_MIN):
 		return
 	if not grant_item("salve", ITEM_SALVE, 1):
 		return
+	var before_region := region_of("salve", person_now("salve"), REGION_TORSO)
+	if failed:
+		return
+	var infected_before := float(before_region.get("infected", -1.0))
+	# From the region's infection as read before the salve, clamped at zero.
+	var expected := infected_before - SALVE_INFECTION_CUT
+	if expected < 0.0:
+		expected = 0.0
 	var start := int(host.call("tick"))
 	if not submit_heal_self("salve", ITEM_SALVE):
 		return
@@ -2382,19 +2407,22 @@ func run_salve() -> void:
 		if bool(region["treated"]):
 			applied = true
 			var infected := float(region["infected"])
-			var expected := INFECTION_SICK - SALVE_INFECTION_CUT
-			if expected < 0.0:
-				expected = 0.0
 			if abs(infected - expected) > 0.02:
-				fail("salve", "infected is %s after the salve, a cut of %s from %s leaves %s" % [infected, SALVE_INFECTION_CUT, INFECTION_SICK, expected])
+				fail("salve", "infected is %s after the salve, a cut of %s from %s leaves %s" % [infected, SALVE_INFECTION_CUT, infected_before, expected])
 				return
 			break
 	if not applied:
 		fail("salve", "salve did not treat the wound within %d ticks" % MAX_HEAL_TICKS)
 		return
 	var elapsed := int(host.call("tick")) - start
-	if elapsed < HEAL_TICKS:
-		fail("salve", "salve applied after %d ticks, a heal takes %d" % [elapsed, HEAL_TICKS])
+	# Medicine at the minimum is what lets the salve through, and that skill
+	# cuts the heal. The listed 60 is the unskilled time. Do not require 60
+	# here: 0.25 keeps 0.9 of it, which is 54.
+	var skilled := int(round(float(HEAL_TICKS) * (1.0 - MEDICINE_SKILL_MIN * SKILL_TIME_RELIEF)))
+	if skilled < 1:
+		skilled = 1
+	if elapsed != skilled:
+		fail("salve", "salve applied after %d ticks; medicine skill %s keeps %s of a %d-tick heal, which is %d" % [elapsed, MEDICINE_SKILL_MIN, 1.0 - MEDICINE_SKILL_MIN * SKILL_TIME_RELIEF, HEAL_TICKS, skilled])
 		return
 	var person := person_now("salve")
 	if failed:
@@ -2415,6 +2443,64 @@ func run_salve() -> void:
 		fail("salve", "infected rose to %s over 2880 ticks after the salve, a halved rate adds %s" % [gained, halved])
 		return
 	ok("salve")
+
+
+func run_self_heal_refused() -> void:
+	if not begin("self-heal-refused"):
+		return
+	if require_catalog_item("self-heal-refused", "salve", ITEM_SALVE) < 0:
+		return
+	# The wound is set by hand at the sickness line because no rule wounds
+	# anybody until milestone 5. Heal is labour: at or above that line the
+	# actor refuses their own heal with wounded and never reaches the salve.
+	# no-skill and salve stay under the line so they can; this check does not.
+	print("self-heal-refused: the wound was set by hand at the sickness line, because no rule wounds anybody until milestone 5, and a person at that line must refuse their own heal")
+	if not hand_wound("self-heal-refused", 0.1, INFECTION_SICK):
+		return
+	if not set_medicine("self-heal-refused", MEDICINE_SKILL_MIN):
+		return
+	if not grant_item("self-heal-refused", ITEM_SALVE, 1):
+		return
+	if not day_and_fed("self-heal-refused"):
+		return
+	var person := person_now("self-heal-refused")
+	if failed:
+		return
+	var region := region_of("self-heal-refused", person, REGION_TORSO)
+	if failed:
+		return
+	var infected_before := float(region.get("infected", -1.0))
+	if infected_before + 0.001 < INFECTION_SICK:
+		fail("self-heal-refused", "infected is %s, the sickness line is %s" % [infected_before, INFECTION_SICK])
+		return
+	var salve_before := carried_count(person, ITEM_SALVE)
+	if salve_before < 1:
+		fail("self-heal-refused", "no salve in hand")
+		return
+	if not submit_heal_self("self-heal-refused", ITEM_SALVE):
+		return
+	# The refusal is at submit. Do not step: a tick would move the infection
+	# on its own, and this check has to say the salve left it unchanged.
+	person = person_now("self-heal-refused")
+	if failed:
+		return
+	var text := failure_text_of(person)
+	if text != "wounded":
+		fail("self-heal-refused", "expected 'wounded', got '%s'" % text)
+		return
+	if int(person.get("failure", -999)) != WOUNDED:
+		fail("self-heal-refused", "wounded discriminant %s, expected %d" % [str(person.get("failure")), WOUNDED])
+		return
+	if carried_count(person, ITEM_SALVE) != salve_before:
+		fail("self-heal-refused", "a refused salve was consumed")
+		return
+	region = region_of("self-heal-refused", person, REGION_TORSO)
+	if failed:
+		return
+	if abs(float(region.get("infected", -1.0)) - infected_before) > 0.001:
+		fail("self-heal-refused", "a refused salve changed infected from %s to %s" % [infected_before, str(region.get("infected"))])
+		return
+	ok("self-heal-refused")
 
 
 func run_tired() -> void:
@@ -2605,23 +2691,105 @@ func run_warmth() -> void:
 func run_cold() -> void:
 	if not begin("cold"):
 		return
-	if not set_body_number("cold", "warmth", 0.0, "warmth was set to zero by hand in the save, because the night target is 0.35 and the open night never reaches the drain line"):
-		return
 	var person := person_now("cold")
 	if failed:
 		return
-	var before := float(person.get("health", -1.0))
-	if not step_n("cold", 1):
+	if not person.has("warmth"):
+		fail("cold", "snapshot person has no 'warmth' (keys: %s)" % str(person.keys()))
+		return
+	# Default warmth, driven from day into night. Do not set warmth near zero:
+	# that hands the check the answer, and an open night that never reaches
+	# the drain then cannot fail.
+	var start_warmth := float(person.get("warmth", -1.0))
+	if abs(start_warmth - 1.0) > 0.001:
+		fail("cold", "warmth starts at %s, expected the default 1; this check does not set it" % start_warmth)
+		return
+	var start_health := float(person.get("health", -1.0))
+	if abs(start_health - 1.0) > 0.001:
+		fail("cold", "health starts at %s, expected 1" % start_health)
+		return
+	if int(host.call("tick")) != 0:
+		fail("cold", "tick starts at %s, expected the start of the day" % str(host.call("tick")))
+		return
+	if campfire_in_warmth(person) or lean_to_in_range(person):
+		fail("cold", "shelter is already in range; a lean-to holds warmth at %s and this night would not reach zero" % LEANTO_WARMTH)
+		return
+	if not step_n("cold", NIGHT_START):
 		return
 	person = person_now("cold")
 	if failed:
 		return
-	var drop := before - float(person.get("health", before))
-	if drop < COLD_HEALTH_PER_TICK * 0.5:
-		fail("cold", "health fell %s in one tick at warmth 0, expected about %s (warmth now %s)" % [drop, COLD_HEALTH_PER_TICK, str(person.get("warmth"))])
+	if int(host.call("tick")) != NIGHT_START:
+		fail("cold", "tick is %s at dusk, expected %d" % [str(host.call("tick")), NIGHT_START])
 		return
-	if drop > COLD_HEALTH_PER_TICK * 3.0:
-		fail("cold", "health fell %s in one tick at warmth 0, expected about %s" % [drop, COLD_HEALTH_PER_TICK])
+	var at_dusk := float(person.get("warmth", -1.0))
+	if abs(at_dusk - AMBIENT_WARMTH_DAY) > 0.02:
+		fail("cold", "warmth is %s at the night boundary, a day in the open settles at %s from the default 1" % [at_dusk, AMBIENT_WARMTH_DAY])
+		return
+	if abs(float(person.get("health", -1.0)) - start_health) > 0.02:
+		fail("cold", "health fell to %s during the day, before warmth could reach zero" % str(person.get("health")))
+		return
+	var first_zero := -1
+	var health_at_zero := -1.0
+	# Large steps while warmth is well above zero, then one tick at a time so
+	# the first zero is the tick the drain starts after. Neither sets warmth.
+	while int(host.call("tick")) < TICKS_PER_DAY and first_zero < 0:
+		person = person_now("cold")
+		if failed:
+			return
+		var warmth_now := float(person.get("warmth", -1.0))
+		if warmth_now == 0.0:
+			first_zero = int(host.call("tick"))
+			health_at_zero = float(person.get("health", -1.0))
+			break
+		var room := TICKS_PER_DAY - int(host.call("tick"))
+		var batch := 1
+		if warmth_now > WARMTH_DRIFT_PER_TICK * 40.0:
+			batch = mini(int(floor(warmth_now / WARMTH_DRIFT_PER_TICK)) - 20, room)
+			if batch < 1:
+				batch = 1
+		if batch > 1:
+			if not step_n("cold", batch):
+				return
+			person = person_now("cold")
+			if failed:
+				return
+			if float(person.get("warmth", -1.0)) == 0.0:
+				fail("cold", "warmth hit zero inside a %d-tick batch ending at tick %s; drift is faster than %s, so the ticks at zero cannot be counted" % [batch, str(host.call("tick")), WARMTH_DRIFT_PER_TICK])
+				return
+			continue
+		if drive_one(false) != 1:
+			fail("cold", "step did not advance one tick")
+			return
+	if first_zero < 0:
+		person = person_now("cold")
+		if failed:
+			return
+		if float(person.get("warmth", -1.0)) == 0.0:
+			first_zero = int(host.call("tick"))
+			health_at_zero = float(person.get("health", -1.0))
+	if first_zero < 0:
+		fail("cold", "warmth is %s at tick %s, the end of a %d-tick night; from %s it should reach zero inside the night (drift %s, night target %s)" % [str(person.get("warmth")), str(host.call("tick")), TICKS_PER_DAY - NIGHT_START, at_dusk, WARMTH_DRIFT_PER_TICK, AMBIENT_WARMTH_NIGHT])
+		return
+	var zero_ticks := TICKS_PER_DAY - first_zero
+	if zero_ticks <= 0:
+		fail("cold", "warmth reached zero at tick %d with no night left to drain" % first_zero)
+		return
+	if not step_n("cold", zero_ticks):
+		return
+	if int(host.call("tick")) != TICKS_PER_DAY:
+		fail("cold", "tick is %s after the night, expected %d" % [str(host.call("tick")), TICKS_PER_DAY])
+		return
+	person = person_now("cold")
+	if failed:
+		return
+	if float(person.get("warmth", -1.0)) != 0.0:
+		fail("cold", "warmth left zero during the open night (now %s)" % str(person.get("warmth")))
+		return
+	var drop := health_at_zero - float(person.get("health", health_at_zero))
+	var expected := float(zero_ticks) * COLD_HEALTH_PER_TICK
+	if abs(drop - expected) > 0.02:
+		fail("cold", "health fell %s over %d ticks at zero, about %s each is %s" % [drop, zero_ticks, COLD_HEALTH_PER_TICK, expected])
 		return
 	ok("cold")
 

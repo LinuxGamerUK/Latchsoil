@@ -6,7 +6,7 @@ use latchsoil_sim::{
     load_from_json, save_to_json, BuildingKind, FailureReason, ItemId, JobKind, RecipeId,
     SaveError, SimState, BUILD_TICKS, CARRY_CAP, EAT_HUNGER_RESTORE, EAT_THIRST_RESTORE,
     HAUL_TICKS_PER_UNIT, HUNGER_PER_TICK, ITEM_BANDAGE, ITEM_FIBER, ITEM_GRAIN, ITEM_KNIFE,
-    ITEM_MEAL, ITEM_STONE, ITEM_WATER, ITEM_WOOD, MALFORMED, MEAL_HUNGER_RESTORE,
+    ITEM_MEAL, ITEM_SALVE, ITEM_STONE, ITEM_WATER, ITEM_WOOD, MALFORMED, MEAL_HUNGER_RESTORE,
     MEAL_THIRST_RESTORE, PEG_X, PEG_Y, QUEUED, RECIPE_BANDAGE, RECIPE_BANDAGE_TICKS, RECIPE_KNIFE,
     RECIPE_KNIFE_TICKS, RECIPE_MEAL, RECIPE_MEAL_TICKS, SAVE_VERSION, STALE, STARTING_GRAIN,
     STATION_RANGE_M, STOCKPILE_CAPACITY, TAKE_TICKS_PER_UNIT, THIRST_PER_TICK,
@@ -133,6 +133,7 @@ fn catalog_names_knife_meal_and_bandage() {
             (5, "knife"),
             (6, "meal"),
             (7, "bandage"),
+            (8, "salve"),
         ]
     );
     let recipes: Vec<_> = catalog
@@ -140,7 +141,10 @@ fn catalog_names_knife_meal_and_bandage() {
         .iter()
         .map(|row| (row.id, row.name.as_str()))
         .collect();
-    assert_eq!(recipes, vec![(0, "knife"), (1, "meal"), (2, "bandage")]);
+    assert_eq!(
+        recipes,
+        vec![(0, "knife"), (1, "meal"), (2, "bandage"), (3, "salve")]
+    );
     assert_eq!(ITEM_KNIFE, ItemId(5));
     assert_eq!(ITEM_MEAL, ItemId(6));
     assert_eq!(ITEM_BANDAGE, ItemId(7));
@@ -699,7 +703,14 @@ fn eat_from(
 
 #[test]
 fn every_non_food_item_fails_no_material() {
-    for item in [ITEM_WOOD, ITEM_STONE, ITEM_FIBER, ITEM_KNIFE, ITEM_BANDAGE] {
+    for item in [
+        ITEM_WOOD,
+        ITEM_STONE,
+        ITEM_FIBER,
+        ITEM_KNIFE,
+        ITEM_BANDAGE,
+        ITEM_SALVE,
+    ] {
         let sim = set_carried(&started(6), &[[item.0, 1]]);
         let mut sim = sim;
         let person = view_person(&sim, 0);
@@ -714,20 +725,23 @@ fn every_non_food_item_fails_no_material() {
 
 #[test]
 fn a_version_1_save_is_migration_not_implemented() {
-    assert_eq!(SAVE_VERSION, 2);
+    assert_eq!(SAVE_VERSION, 3);
     let sim = started(1);
     let mut value: serde_json::Value = serde_json::from_str(&save_to_json(&sim)).unwrap();
     value["save_version"] = serde_json::json!(1);
     let err = load_from_json(&value.to_string()).unwrap_err();
     assert!(matches!(
         err,
-        SaveError::MigrationNotImplemented { from: 1, to: 2 }
+        SaveError::MigrationNotImplemented {
+            from: 1,
+            to: SAVE_VERSION
+        }
     ));
 }
 
 #[test]
 fn a_version_2_save_round_trip_carries_buildings_progress_and_contents() {
-    assert_eq!(SAVE_VERSION, 2);
+    assert_eq!(SAVE_VERSION, 3);
     let first = scripted_holding(21);
     let second = scripted_holding(21);
     assert_eq!(first.state_hash(), second.state_hash());

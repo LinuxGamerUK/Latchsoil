@@ -1,7 +1,8 @@
 extends Node3D
 
-# Milestone 1b blockout. Godot presents; the sim decides.
+# Milestone 1b blockout, plus the milestone 2 reads. Godot presents; the sim decides.
 # Time advances only through frame(). This scene never calls step.
+# fatigue, warmth, skills and regions are drawn only when the snapshot carries them.
 
 const HOST_CLASS := "SimHost"
 const SEED := 1
@@ -9,7 +10,12 @@ const BUILD_TICKS := 60
 const KIND_STOCKPILE := 2
 const RECIPE_NAMES: PackedStringArray = ["knife", "meal", "bandage"]
 const BUILDING_NAMES: PackedStringArray = ["campfire", "lean-to", "stockpile"]
-const ITEM_FALLBACK: PackedStringArray = ["grain", "wood", "stone", "fiber", "water", "knife", "meal", "bandage"]
+const ITEM_FALLBACK: PackedStringArray = ["grain", "wood", "stone", "fiber", "water", "knife", "meal", "bandage", "salve"]
+const ITEM_BANDAGE := 7
+const ITEM_SALVE := 8
+const JOB_REST := 7
+const REGION_NAMES: PackedStringArray = ["head", "torso", "left arm", "right arm", "left leg", "right leg"]
+const SKILL_NAMES: PackedStringArray = ["gather", "build", "craft", "medicine"]
 const REQUIRED: PackedStringArray = [
 	"new_game", "attach", "frame", "poll", "set_paused",
 	"submit_move", "submit_gather", "submit_eat",
@@ -27,10 +33,12 @@ var item_names: Dictionary = {}
 var recipe_names: Dictionary = {}
 var build_mode := false
 var craft_mode := false
+var heal_mode := false
 var build_kind := 0
 var building_sel: Dictionary = {}
 var armed_carry_id := -1
 var armed_store_id := -1
+var armed_heal_id := -1
 var ghost_point = null
 var _ghost_shown := false
 var _frame_budget := -1
@@ -54,6 +62,10 @@ func _ready() -> void:
 		hud.craft_chosen.connect(_on_craft_slot)
 		hud.haul_asked.connect(_on_haul_asked)
 		hud.take_asked.connect(_on_take_asked)
+	if hud.has_signal("heal_asked"):
+		hud.heal_asked.connect(_toggle_heal)
+	if hud.has_signal("sleep_asked"):
+		hud.sleep_asked.connect(_order_sleep)
 	_boot_sim()
 
 
@@ -122,7 +134,16 @@ func _unhandled_input(event: InputEvent) -> void:
 			_on_take_asked()
 			get_viewport().set_input_as_handled()
 		elif event.keycode == KEY_G:
-			_cycle_carry(1)
+			if heal_mode:
+				_cycle_heal_item(1)
+			else:
+				_cycle_carry(1)
+			get_viewport().set_input_as_handled()
+		elif event.keycode == KEY_J:
+			_toggle_heal()
+			get_viewport().set_input_as_handled()
+		elif event.keycode == KEY_R:
+			_order_sleep()
 			get_viewport().set_input_as_handled()
 		elif event.keycode == KEY_V:
 			_cycle_store(1)
@@ -225,6 +246,12 @@ func _on_click(event: InputEventMouseButton) -> void:
 			_place_at_click(event.position)
 			get_viewport().set_input_as_handled()
 			return
+		if heal_mode:
+			var target: Dictionary = view.pick_person(camera, event.position)
+			if not target.is_empty():
+				_order_heal(target)
+			get_viewport().set_input_as_handled()
+			return
 		var person: Dictionary = view.pick_person(camera, event.position)
 		if not person.is_empty():
 			_select(_int_of(person.get("index", -1), -1), _int_of(person.get("generation", -1), -1), event.shift_pressed)
@@ -238,7 +265,7 @@ func _on_click(event: InputEventMouseButton) -> void:
 				_refresh_view()
 		get_viewport().set_input_as_handled()
 	elif event.button_index == MOUSE_BUTTON_RIGHT:
-		if build_mode or craft_mode:
+		if build_mode or craft_mode or heal_mode:
 			_exit_modes()
 			get_viewport().set_input_as_handled()
 			return
@@ -306,6 +333,7 @@ func _toggle_build() -> void:
 	build_mode = not build_mode
 	if build_mode:
 		craft_mode = false
+		heal_mode = false
 	_refresh_hud()
 
 
@@ -313,16 +341,30 @@ func _toggle_craft() -> void:
 	craft_mode = not craft_mode
 	if craft_mode:
 		build_mode = false
+		heal_mode = false
+	_refresh_hud()
+
+
+func _toggle_heal() -> void:
+	heal_mode = not heal_mode
+	if heal_mode:
+		build_mode = false
+		craft_mode = false
+		_sync_heal_item()
 	_refresh_hud()
 
 
 func _exit_modes() -> void:
 	build_mode = false
 	craft_mode = false
+	heal_mode = false
 	_refresh_hud()
 
 
 func _on_number(slot: int) -> void:
+	if heal_mode:
+		_arm_heal_slot(slot)
+		return
 	if build_mode:
 		build_kind = slot
 		_refresh_hud()
@@ -336,6 +378,7 @@ func _on_build_kind(kind: int) -> void:
 	build_kind = kind
 	build_mode = true
 	craft_mode = false
+	heal_mode = false
 	_refresh_hud()
 
 
@@ -345,6 +388,93 @@ func _on_craft_slot(slot: int) -> void:
 
 func _on_haul_asked() -> void:
 	_order_haul_to(building_sel)
+
+
+func _order_sleep() -> void:
+	if selection.is_empty():
+		_warn_once("sleep_actor", "latchsoil: sleep needs a selected person")
+		return
+	for sel in selection:
+		if not sel is Dictionary:
+			continue
+		var index := _int_of(sel.get("index", -1), -1)
+		var generation := _int_of(sel.get("generation", -1), -1)
+		var result = _submit("submit_work", [index, generation, JOB_REST])
+		if result != null:
+			_note_submit(_id_key(index, generation), result)
+	_refresh_view()
+
+
+func _order_heal(target: Dictionary) -> void:
+	if selection.is_empty():
+		_warn_once("heal_actor", "latchsoil: heal needs a selected person")
+		return
+	_sync_heal_item()
+	if armed_heal_id < 0:
+		_warn_once("heal_item", "latchsoil: heal needs a bandage or a salve")
+		return
+	var target_index := _int_of(target.get("index", -1), -1)
+	var target_generation := _int_of(target.get("generation", -1), -1)
+	if target_index < 0:
+		return
+	for sel in selection:
+		if not sel is Dictionary:
+			continue
+		var index := _int_of(sel.get("index", -1), -1)
+		var generation := _int_of(sel.get("generation", -1), -1)
+		var result = _submit("submit_heal", [index, generation, target_index, target_generation, armed_heal_id])
+		if result != null:
+			_note_submit(_id_key(index, generation), result)
+	_refresh_view()
+
+
+func _arm_heal_slot(slot: int) -> void:
+	var item_id := -1
+	if slot == 0:
+		item_id = ITEM_BANDAGE
+	elif slot == 1:
+		item_id = ITEM_SALVE
+	else:
+		return
+	var person := _first_selected_person()
+	var goods := _heal_goods(person) if not person.is_empty() else []
+	if not _goods_has(goods, item_id):
+		_warn_once("heal_item", "latchsoil: heal needs a bandage or a salve")
+		return
+	armed_heal_id = item_id
+	_refresh_hud()
+
+
+func _cycle_heal_item(step: int) -> void:
+	var person := _first_selected_person()
+	var goods := _heal_goods(person) if not person.is_empty() else []
+	if goods.is_empty():
+		armed_heal_id = -1
+		_refresh_hud()
+		return
+	var index := _goods_index(goods, armed_heal_id)
+	if index < 0:
+		index = 0
+	else:
+		index = posmod(index + step, goods.size())
+	armed_heal_id = int(goods[index]["id"])
+	_refresh_hud()
+
+
+func _heal_goods(person: Dictionary) -> Array:
+	var out: Array = []
+	for pair in _goods(person.get("carried", [])):
+		var item_id := int(pair["id"])
+		if item_id == ITEM_BANDAGE or item_id == ITEM_SALVE:
+			out.append(pair)
+	return out
+
+
+func _sync_heal_item() -> void:
+	var person := _first_selected_person()
+	var goods := _heal_goods(person) if not person.is_empty() else []
+	if not _goods_has(goods, armed_heal_id):
+		armed_heal_id = int(goods[0]["id"]) if not goods.is_empty() else -1
 
 
 func _on_take_asked() -> void:
@@ -553,6 +683,8 @@ func _refresh_hud() -> void:
 		hud.show_detail(_detail_text())
 	if hud.has_method("set_build_highlight"):
 		hud.set_build_highlight(build_kind if build_mode else -1)
+	if hud.has_method("set_heal_highlight"):
+		hud.set_heal_highlight(heal_mode)
 
 
 func _failure_text() -> String:
@@ -586,6 +718,15 @@ func _failure_of(people: Array, index: int, generation: int) -> String:
 
 func _detail_text() -> String:
 	var lines := PackedStringArray()
+	for sel in selection:
+		if not sel is Dictionary:
+			continue
+		var person := _person_by_id(sel)
+		if person.is_empty():
+			continue
+		var vitals := _vitals_lines(person)
+		for line in vitals:
+			lines.append(line)
 	var carry := _carry_line()
 	if carry != "":
 		lines.append(carry)
@@ -602,7 +743,136 @@ func _detail_text() -> String:
 		lines.append("placing %s" % _building_name(build_kind))
 	if craft_mode:
 		lines.append("craft  1 %s  2 %s  3 %s" % [RECIPE_NAMES[0], RECIPE_NAMES[1], RECIPE_NAMES[2]])
+	if heal_mode:
+		_sync_heal_item()
+		if armed_heal_id >= 0:
+			lines.append("heal with %s — 1 bandage  2 salve, click a person" % _item_name(armed_heal_id))
+		else:
+			lines.append("heal — no bandage or salve")
 	return "\n".join(lines)
+
+
+func _vitals_lines(person: Dictionary) -> PackedStringArray:
+	var lines := PackedStringArray()
+	var meters := PackedStringArray()
+	if person.has("fatigue"):
+		meters.append("fatigue %.2f" % _float_of(person.get("fatigue"), 0.0))
+	if person.has("warmth"):
+		meters.append("warmth %.2f" % _float_of(person.get("warmth"), 0.0))
+	if not meters.is_empty():
+		lines.append(" ".join(meters))
+	var wounds := _wound_summary(person)
+	if wounds != "":
+		lines.append(wounds)
+	var skills := _skills_line(person.get("skills", null))
+	if skills != "":
+		lines.append(skills)
+	return lines
+
+
+func _wound_summary(person: Dictionary) -> String:
+	var regions := _region_rows(person)
+	if regions.is_empty():
+		return ""
+	var bits := PackedStringArray()
+	for i in regions.size():
+		var entry = regions[i]
+		if not entry is Dictionary or not _region_hurt(entry):
+			continue
+		var slot := _region_slot(entry, i)
+		var name := REGION_NAMES[slot] if slot >= 0 and slot < REGION_NAMES.size() else "region %d" % i
+		var flags := PackedStringArray()
+		if _float_of(entry.get("bleeding", 0.0), 0.0) > 0.0:
+			flags.append("bleeding")
+		if _float_of(entry.get("infected", 0.0), 0.0) > 0.0:
+			flags.append("infected")
+		if _flag(entry.get("bandaged", false)):
+			flags.append("bandaged")
+		if _float_of(entry.get("health", 1.0), 1.0) < 1.0 and flags.is_empty():
+			flags.append("hurt")
+		flags.append("treated" if _flag(entry.get("treated", false)) else "untreated")
+		bits.append("%s %s" % [name, ", ".join(flags)])
+	if bits.is_empty():
+		return ""
+	return "wounds: " + "; ".join(bits)
+
+
+func _skills_line(value) -> String:
+	if value == null:
+		return ""
+	var parts := PackedStringArray()
+	if value is Array:
+		for i in mini(value.size(), SKILL_NAMES.size()):
+			parts.append("%s %.2f" % [SKILL_NAMES[i], _float_of(value[i], 0.0)])
+	elif value is Dictionary:
+		for i in SKILL_NAMES.size():
+			var key := SKILL_NAMES[i]
+			if value.has(key):
+				parts.append("%s %.2f" % [key, _float_of(value[key], 0.0)])
+			elif value.has(i):
+				parts.append("%s %.2f" % [key, _float_of(value[i], 0.0)])
+	if parts.is_empty():
+		return ""
+	return "skills: " + ", ".join(parts)
+
+
+func _region_rows(person: Dictionary) -> Array:
+	var value = person.get("regions", null)
+	if value is Array:
+		return value
+	if not value is Dictionary:
+		return []
+	var names: Array = ["head", "torso", "left arm", "right arm", "left leg", "right leg"]
+	var alts: Array = ["head", "torso", "left_arm", "right_arm", "left_leg", "right_leg"]
+	var out: Array = []
+	var found := false
+	for i in names.size():
+		var entry = null
+		if value.has(names[i]):
+			entry = value[names[i]]
+			found = true
+		elif value.has(alts[i]):
+			entry = value[alts[i]]
+			found = true
+		elif value.has(i):
+			entry = value[i]
+			found = true
+		out.append(entry if entry is Dictionary else {})
+	return out if found else []
+
+
+func _region_slot(entry: Dictionary, fallback: int) -> int:
+	if entry.has("kind"):
+		var kind := _int_of(entry.get("kind"), -1)
+		if kind >= 0 and kind < REGION_NAMES.size():
+			return kind
+	return fallback
+
+
+func _region_hurt(entry: Dictionary) -> bool:
+	if _float_of(entry.get("health", 1.0), 1.0) < 0.999:
+		return true
+	if _float_of(entry.get("bleeding", 0.0), 0.0) > 0.001:
+		return true
+	if _float_of(entry.get("infected", 0.0), 0.0) > 0.001:
+		return true
+	if _flag(entry.get("bandaged", false)) or _flag(entry.get("treated", false)):
+		return true
+	return false
+
+
+func _flag(value) -> bool:
+	if value is bool:
+		return value
+	if value is int or value is float:
+		return int(value) != 0
+	return false
+
+
+func _float_of(value, fallback: float) -> float:
+	if value is int or value is float:
+		return float(value)
+	return fallback
 
 
 func _carry_line() -> String:

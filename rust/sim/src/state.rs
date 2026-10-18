@@ -5,32 +5,41 @@
 //! of rules. One rejection does not stop the batch. The queue is not saved and
 //! is not hashed. A successful `new_game` or load clears it.
 
-use crate::catalog::{self, item_known, recipe_known, Catalog, ITEM_GRAIN, ITEM_MEAL, ITEM_WATER};
+use crate::catalog::{
+    self, item_known, recipe_known, Catalog, ITEM_BANDAGE, ITEM_GRAIN, ITEM_KNIFE, ITEM_MEAL,
+    ITEM_SALVE, ITEM_WATER,
+};
 use crate::clock::Clock;
 use crate::command::{
-    BuildingKind, Command, FailureReason, ItemId, JobKind, RecipeId, MALFORMED, QUEUED, QUEUE_FULL,
-    STALE,
+    BuildingKind, Command, FailureReason, ItemId, JobKind, RecipeId, RegionKind, MALFORMED, QUEUED,
+    QUEUE_FULL, STALE,
 };
 use crate::ids::{EntityAllocator, EntityId, EntityKind};
 use crate::path::{self, advance_along};
 use crate::rng::SplitMix64;
 use crate::rules::{
-    dist, night_at, BESIDE_PEG, BUILD_TICKS, CARRY_CAP, EAT_HUNGER_RESTORE, EAT_THIRST_RESTORE,
-    FIBER_REMAINING, GATHER_TICKS_PER_UNIT, HAUL_TICKS_PER_UNIT, HEALTH_PER_TICK, HEALTH_REFUSAL,
-    HUNGER_PER_TICK, HUNGER_REFUSAL, MEAL_HUNGER_RESTORE, MEAL_THIRST_RESTORE, NODE_MIN_APART,
-    NODE_MIN_FROM_PEG, OWNER_CAP, PEG_X, PEG_Y, QUEUE_CAP, STARTING_GRAIN, STATION_RANGE_M,
+    dist, night_at, scaled_work_ticks, AMBIENT_WARMTH_DAY, AMBIENT_WARMTH_NIGHT, BESIDE_PEG,
+    BLEED_HEALTH_PER_TICK, BUILD_TICKS, CARRY_CAP, COLD_HEALTH_PER_TICK, EAT_HUNGER_RESTORE,
+    EAT_THIRST_RESTORE, FATIGUE_PER_TICK, FATIGUE_REFUSAL, FATIGUE_WORK_MULTIPLIER,
+    FIBER_REMAINING, GATHER_TICKS_PER_UNIT, GATHER_TOOL_RELIEF, HAUL_TICKS_PER_UNIT,
+    HEALTH_PER_TICK, HEALTH_REFUSAL, HEAL_TICKS, HUNGER_PER_TICK, HUNGER_REFUSAL,
+    INFECTION_HEALTH_PER_TICK, INFECTION_PER_TICK, INFECTION_SICK, LEANTO_WARMTH,
+    MEAL_HUNGER_RESTORE, MEAL_THIRST_RESTORE, MEDICINE_SKILL_MIN, NODE_MIN_APART,
+    NODE_MIN_FROM_PEG, OWNER_CAP, PEG_X, PEG_Y, QUEUE_CAP, SALVE_INFECTION_CUT, SKILL_BUILD,
+    SKILL_COUNT, SKILL_CRAFT, SKILL_GATHER,
+    SKILL_MEDICINE, SKILL_PER_UNIT, SLEEP_RECOVER_PER_TICK, STARTING_GRAIN, STATION_RANGE_M,
     STOCKPILE_CAPACITY, STONE_REMAINING, TAKE_TICKS_PER_UNIT, THIRST_PER_TICK,
-    WALK_METERS_PER_TICK, WATER_HUNGER_RESTORE, WATER_REMAINING, WATER_THIRST_RESTORE,
-    WAYPOINT_REACH_METERS, WOOD_REMAINING,
+    WALK_METERS_PER_TICK, WARMTH_DRIFT_PER_TICK, WARMTH_RANGE_M, WATER_HUNGER_RESTORE,
+    WATER_REMAINING, WATER_THIRST_RESTORE, WAYPOINT_REACH_METERS, WOOD_REMAINING,
 };
-use crate::snapshot::{BuildingView, NodeView, PersonView, Rejections, Snapshot};
+use crate::snapshot::{BuildingView, NodeView, PersonView, RegionView, Rejections, Snapshot};
 use serde::{Deserialize, Serialize};
 
 /// Save format this crate writes and will load without a migration.
 ///
-/// Version 1 is the milestone 1a acre. Nothing shipped, so it is refused rather
-/// than migrated.
-pub const SAVE_VERSION: u32 = 2;
+/// Versions 1 and 2 are the earlier milestones. Nothing shipped, so they are
+/// refused rather than migrated.
+pub const SAVE_VERSION: u32 = 3;
 
 /// One running simulation.
 #[derive(Debug, Clone, PartialEq)]
@@ -68,6 +77,10 @@ pub(crate) struct Person {
     dest: Option<[f32; 2]>,
     target: Option<EntityId>,
     gather_ticks: u32,
+    fatigue: f32,
+    warmth: f32,
+    skills: [f32; SKILL_COUNT],
+    regions: [Region; 6],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +100,16 @@ pub(crate) struct Node {
     y: f32,
     remaining: u32,
     yield_item: ItemId,
+}
+
+/// One body region. Kind is the index in [`RegionKind`] order, not stored.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Region {
+    health: f32,
+    bleeding: f32,
+    infected: f32,
+    bandaged: bool,
+    treated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -220,7 +243,7 @@ impl SimState {
             self.reject(QUEUE_FULL, cmd);
             return QUEUE_FULL;
         }
-        if cmd.is_work_order() {
+        if cmd.is_work_order() && !is_rest(cmd) {
             if let Some(reason) = self.work_refusal(cmd.actor()) {
                 self.refuse_work(cmd.actor(), reason);
                 return QUEUED;
@@ -374,6 +397,33 @@ impl SimState {
                 index: from_index,
                 generation: from_gen,
             },
+        }))
+    }
+
+    /// Queue a heal. Same codes as the other submits: 0 queued, 1 malformed,
+    /// 2 stale, 3 queue full. An id that does not fit in `u32` is `(0, 0)`,
+    /// which is never live. An item id that does not fit is not in the table.
+    pub fn submit_heal(
+        &mut self,
+        actor_index: i64,
+        actor_gen: i64,
+        target_index: i64,
+        target_gen: i64,
+        item_id: i64,
+    ) -> i64 {
+        let (actor_index, actor_gen) = narrow_id(actor_index, actor_gen);
+        let (target_index, target_gen) = narrow_id(target_index, target_gen);
+        let item_id = u32::try_from(item_id).unwrap_or(u32::MAX);
+        i64::from(self.submit(Command::Heal {
+            actor: EntityId {
+                index: actor_index,
+                generation: actor_gen,
+            },
+            target: EntityId {
+                index: target_index,
+                generation: target_gen,
+            },
+            item: ItemId(item_id),
         }))
     }
 
@@ -550,8 +600,11 @@ impl SimState {
         if night_at(self.clock.tick()) {
             return Some(FailureReason::Night);
         }
-        if person.health < HEALTH_REFUSAL {
+        if person.health < HEALTH_REFUSAL || person.sick() {
             return Some(FailureReason::Wounded);
+        }
+        if person.fatigue > FATIGUE_REFUSAL {
+            return Some(FailureReason::Tired);
         }
         None
     }
@@ -685,6 +738,7 @@ impl SimState {
                 person.failure = None;
             }
             Command::Take { from, .. } => self.begin_walk_order(pi, cmd, from),
+            Command::Heal { target, .. } => self.begin_heal(pi, cmd, target),
         }
     }
 
@@ -696,6 +750,26 @@ impl SimState {
             .iter()
             .find(|b| b.id == target)
             .map(|b| [b.x, b.y]);
+        let path = dest
+            .and_then(|to| path::path_to(from, to))
+            .unwrap_or_default();
+        let person = &mut self.people[pi];
+        person.order = Some(cmd);
+        person.path = path;
+        person.dest = dest;
+        person.target = Some(target);
+        person.gather_ticks = 0;
+        person.failure = None;
+    }
+
+    /// Walk to the patient. A self-heal is already in range.
+    fn begin_heal(&mut self, pi: usize, cmd: Command, target: EntityId) {
+        let from = [self.people[pi].x, self.people[pi].y];
+        let dest = self
+            .people
+            .iter()
+            .find(|person| person.id == target)
+            .map(|person| person.pos());
         let path = dest
             .and_then(|to| path::path_to(from, to))
             .unwrap_or_default();
@@ -733,10 +807,10 @@ impl SimState {
     }
 
     fn run_rules(&mut self) {
-        for person in &mut self.people {
-            decay_needs(person);
-        }
         let count = self.people.len();
+        for i in 0..count {
+            self.tick_body(i);
+        }
         for i in 0..count {
             self.tick_order(i);
         }
@@ -754,6 +828,8 @@ impl SimState {
             Command::Haul { item, to, .. } => self.tick_haul(index, item, to),
             Command::Take { item, from, .. } => self.tick_take(index, item, from),
             Command::Craft { recipe, .. } => self.tick_craft(index, recipe),
+            Command::Heal { target, item, .. } => self.tick_heal(index, target, item),
+            Command::Work { job, .. } if job == JobKind::Rest => self.tick_rest(index),
             Command::Work { .. } | Command::Draft { .. } | Command::Attack { .. } => {}
         }
     }
@@ -799,8 +875,13 @@ impl SimState {
             fail(&mut self.people[index], FailureReason::NoPath);
             return;
         }
+        let needed = scaled_work_ticks(
+            GATHER_TICKS_PER_UNIT,
+            self.people[index].skills[SKILL_GATHER],
+            self.gather_tool_relief(index),
+        );
         self.people[index].gather_ticks += 1;
-        if self.people[index].gather_ticks < GATHER_TICKS_PER_UNIT {
+        if self.people[index].gather_ticks < needed {
             return;
         }
         self.people[index].gather_ticks = 0;
@@ -821,6 +902,7 @@ impl SimState {
         self.nodes[node_i].remaining -= 1;
         let drained = self.nodes[node_i].remaining == 0;
         add_carried(&mut self.people[index].carried, yield_item, 1);
+        raise_skill(&mut self.people[index], SKILL_GATHER);
         if drained {
             fail(&mut self.people[index], FailureReason::NoMaterial);
             return;
@@ -875,8 +957,14 @@ impl SimState {
             }
             person.path.clear();
         }
-        self.buildings[bi].progress += 1;
-        if self.buildings[bi].progress >= BUILD_TICKS {
+        let needed = scaled_work_ticks(BUILD_TICKS, self.people[index].skills[SKILL_BUILD], 0.0);
+        self.people[index].gather_ticks += 1;
+        let worked = self.people[index].gather_ticks;
+        let progress = (worked.saturating_mul(BUILD_TICKS) / needed).min(BUILD_TICKS);
+        self.buildings[bi].progress = progress;
+        if worked >= needed {
+            self.buildings[bi].progress = BUILD_TICKS;
+            raise_skill(&mut self.people[index], SKILL_BUILD);
             complete(&mut self.people[index]);
         }
     }
@@ -952,14 +1040,16 @@ impl SimState {
                 return;
             }
         }
+        let needed = scaled_work_ticks(recipe.ticks, self.people[index].skills[SKILL_CRAFT], 0.0);
         self.people[index].gather_ticks += 1;
-        if self.people[index].gather_ticks < recipe.ticks {
+        if self.people[index].gather_ticks < needed {
             return;
         }
         for (item, count) in recipe.inputs {
             take_carried(&mut self.people[index].carried, *item, *count);
         }
         add_carried(&mut self.people[index].carried, recipe.output, 1);
+        raise_skill(&mut self.people[index], SKILL_CRAFT);
         complete(&mut self.people[index]);
     }
 
@@ -974,6 +1064,12 @@ impl SimState {
         let missing_tool = recipe.tool.is_some_and(|tool| count_of(carried, tool) == 0);
         if missing_input || missing_tool {
             return Some(FailureReason::NoMaterial);
+        }
+        if recipe
+            .medicine_min
+            .is_some_and(|min| self.people[index].skills[SKILL_MEDICINE] < min)
+        {
+            return Some(FailureReason::NoSkill);
         }
         if recipe
             .station
@@ -1000,6 +1096,166 @@ impl SimState {
                 && building.kind == BuildingKind::Stockpile
                 && building.progress >= BUILD_TICKS
         })
+    }
+
+    fn tick_body(&mut self, index: usize) {
+        decay_needs(&mut self.people[index]);
+        tick_wounds(&mut self.people[index]);
+        self.tick_warmth(index);
+        self.tick_fatigue_gain(index);
+    }
+
+    fn tick_warmth(&mut self, index: usize) {
+        let pos = self.people[index].pos();
+        let by_fire = self.near_finished(pos, BuildingKind::Campfire, WARMTH_RANGE_M);
+        let target = if by_fire {
+            1.0
+        } else if night_at(self.clock.tick()) {
+            if self.near_finished(pos, BuildingKind::LeanTo, STATION_RANGE_M) {
+                LEANTO_WARMTH
+            } else {
+                AMBIENT_WARMTH_NIGHT
+            }
+        } else {
+            AMBIENT_WARMTH_DAY
+        };
+        let person = &mut self.people[index];
+        if person.warmth <= 0.0 {
+            person.health = (person.health - COLD_HEALTH_PER_TICK).max(0.0);
+        }
+        let delta = target - person.warmth;
+        if delta.abs() <= WARMTH_DRIFT_PER_TICK {
+            person.warmth = target;
+        } else if delta > 0.0 {
+            person.warmth += WARMTH_DRIFT_PER_TICK;
+        } else {
+            // Drifting down never passes the target, so an open night lands on 0.0.
+            person.warmth = (person.warmth - WARMTH_DRIFT_PER_TICK).max(target);
+        }
+        person.warmth = person.warmth.clamp(0.0, 1.0);
+    }
+
+    fn tick_fatigue_gain(&mut self, index: usize) {
+        let order = self.people[index].order;
+        if matches!(
+            order,
+            Some(Command::Work {
+                job: JobKind::Rest,
+                ..
+            })
+        ) {
+            return;
+        }
+        let gain = if fatigue_working(order) {
+            FATIGUE_PER_TICK * FATIGUE_WORK_MULTIPLIER
+        } else {
+            FATIGUE_PER_TICK
+        };
+        self.people[index].fatigue = (self.people[index].fatigue + gain).min(1.0);
+    }
+
+    fn gather_tool_relief(&self, index: usize) -> f32 {
+        if count_of(&self.people[index].carried, ITEM_KNIFE) > 0 {
+            GATHER_TOOL_RELIEF
+        } else {
+            0.0
+        }
+    }
+
+    fn near_finished(&self, pos: [f32; 2], kind: BuildingKind, range: f32) -> bool {
+        self.buildings.iter().any(|building| {
+            building.kind == kind
+                && building.progress >= BUILD_TICKS
+                && dist(pos, [building.x, building.y]) <= range
+        })
+    }
+
+    fn tick_rest(&mut self, index: usize) {
+        let pos = self.people[index].pos();
+        let sheltered = self.near_finished(pos, BuildingKind::LeanTo, STATION_RANGE_M);
+        let rate = if sheltered {
+            SLEEP_RECOVER_PER_TICK * 2.0
+        } else {
+            SLEEP_RECOVER_PER_TICK
+        };
+        let person = &mut self.people[index];
+        person.fatigue = (person.fatigue - rate).max(0.0);
+        if person.fatigue == 0.0 {
+            complete(person);
+        }
+    }
+
+    /// Fail before walking when the item, the wound, or the skill cannot treat.
+    /// NoMaterial is earlier than NoSkill, so a useless item wins over a missing skill.
+    fn heal_block(&self, index: usize, target: EntityId, item: ItemId) -> Option<FailureReason> {
+        if item != ITEM_BANDAGE && item != ITEM_SALVE {
+            return Some(FailureReason::NoMaterial);
+        }
+        if count_of(&self.people[index].carried, item) == 0 {
+            return Some(FailureReason::NoMaterial);
+        }
+        let medicine = self.people[index].skills[SKILL_MEDICINE];
+        let Some(patient) = self.people.iter().find(|person| person.id == target) else {
+            return Some(FailureReason::NoPath);
+        };
+        if item == ITEM_BANDAGE && worst_bleeding(&patient.regions).is_none() {
+            return Some(FailureReason::NoMaterial);
+        }
+        if item == ITEM_SALVE && worst_infected(&patient.regions).is_none() {
+            return Some(FailureReason::NoMaterial);
+        }
+        if item == ITEM_SALVE && medicine < MEDICINE_SKILL_MIN {
+            return Some(FailureReason::NoSkill);
+        }
+        None
+    }
+
+    fn tick_heal(&mut self, index: usize, target: EntityId, item: ItemId) {
+        if self.people[index].gather_ticks == 0 {
+            if let Some(reason) = self.heal_block(index, target, item) {
+                fail(&mut self.people[index], reason);
+                return;
+            }
+        }
+        let Some(target_pos) = self
+            .people
+            .iter()
+            .find(|person| person.id == target)
+            .map(|person| person.pos())
+        else {
+            fail(&mut self.people[index], FailureReason::NoPath);
+            return;
+        };
+        if dist(self.people[index].pos(), target_pos) > STATION_RANGE_M {
+            if self.people[index].path.is_empty() {
+                fail(&mut self.people[index], FailureReason::NoPath);
+                return;
+            }
+            let person = &mut self.people[index];
+            let mut pos = person.pos();
+            advance_along(&mut pos, &mut person.path, WALK_METERS_PER_TICK);
+            person.x = pos[0];
+            person.y = pos[1];
+            if dist(person.pos(), target_pos) > STATION_RANGE_M {
+                return;
+            }
+            person.path.clear();
+        }
+        let needed = scaled_work_ticks(HEAL_TICKS, self.people[index].skills[SKILL_MEDICINE], 0.0);
+        self.people[index].gather_ticks += 1;
+        if self.people[index].gather_ticks < needed {
+            return;
+        }
+        if let Some(reason) = self.heal_block(index, target, item) {
+            fail(&mut self.people[index], reason);
+            return;
+        }
+        take_carried(&mut self.people[index].carried, item, 1);
+        if let Some(patient) = self.people.iter_mut().find(|person| person.id == target) {
+            apply_treatment(patient, item);
+        }
+        raise_skill(&mut self.people[index], SKILL_MEDICINE);
+        complete(&mut self.people[index]);
     }
 
     /// Walk toward building `bi`. `true` once stood on it.
@@ -1137,9 +1393,10 @@ fn coords_finite(cmd: Command) -> bool {
 
 fn items_known(cmd: Command) -> bool {
     match cmd {
-        Command::Eat { item, .. } | Command::Haul { item, .. } | Command::Take { item, .. } => {
-            item_known(item)
-        }
+        Command::Eat { item, .. }
+        | Command::Haul { item, .. }
+        | Command::Take { item, .. }
+        | Command::Heal { item, .. } => item_known(item),
         Command::Craft { recipe, .. } => recipe_known(recipe),
         _ => true,
     }
@@ -1156,7 +1413,9 @@ fn referenced_ids(cmd: Command) -> Vec<EntityId> {
         Command::Gather { actor, node } => vec![actor, node],
         Command::Haul { actor, to, .. } => vec![actor, to],
         Command::Take { actor, from, .. } => vec![actor, from],
-        Command::Attack { actor, target } => vec![actor, target],
+        Command::Attack { actor, target } | Command::Heal { actor, target, .. } => {
+            vec![actor, target]
+        }
     }
 }
 
@@ -1170,6 +1429,7 @@ fn kinds_match(sim: &SimState, cmd: Command) -> bool {
         Command::Haul { to, .. } => is_stockpile(sim, to),
         Command::Take { from, .. } => is_stockpile(sim, from),
         Command::Attack { target, .. } => sim.alloc.is_live(target),
+        Command::Heal { target, .. } => sim.alloc.kind(target) == Some(EntityKind::Person),
         _ => true,
     }
 }
@@ -1185,6 +1445,106 @@ fn decay_needs(person: &mut Person) {
     person.thirst = (person.thirst - THIRST_PER_TICK).max(0.0);
     if person.hunger == 0.0 || person.thirst == 0.0 {
         person.health = (person.health - HEALTH_PER_TICK).max(0.0);
+    }
+}
+
+fn tick_wounds(person: &mut Person) {
+    let bleed: f32 = person.regions.iter().map(|region| region.bleeding).sum();
+    if bleed > 0.0 {
+        person.health = (person.health - BLEED_HEALTH_PER_TICK * bleed).max(0.0);
+    }
+    for region in &mut person.regions {
+        if !region.is_wound() {
+            continue;
+        }
+        let mut rate = INFECTION_PER_TICK;
+        if region.bandaged {
+            rate *= 0.1;
+        }
+        if region.treated {
+            rate *= 0.5;
+        }
+        region.infected = (region.infected + rate).min(1.0);
+    }
+    if person.sick() {
+        person.health = (person.health - INFECTION_HEALTH_PER_TICK).max(0.0);
+    }
+}
+
+fn is_rest(cmd: Command) -> bool {
+    matches!(
+        cmd,
+        Command::Work {
+            job: JobKind::Rest,
+            ..
+        }
+    )
+}
+
+/// Walking or doing a job that has a rule. Rest recovers instead. Eat, Draft,
+/// Attack, and an inert `Work` kind are idle: they are not the labour the
+/// fatigue multiplier names.
+fn fatigue_working(order: Option<Command>) -> bool {
+    matches!(
+        order,
+        Some(
+            Command::Move { .. }
+                | Command::Gather { .. }
+                | Command::Haul { .. }
+                | Command::Place { .. }
+                | Command::Craft { .. }
+                | Command::Take { .. }
+                | Command::Heal { .. }
+        )
+    )
+}
+
+fn raise_skill(person: &mut Person, skill: usize) {
+    person.skills[skill] = (person.skills[skill] + SKILL_PER_UNIT).min(1.0);
+}
+
+/// Highest bleeding above zero. A tie keeps the earlier region.
+fn worst_bleeding(regions: &[Region]) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (index, region) in regions.iter().enumerate() {
+        if region.bleeding <= 0.0 {
+            continue;
+        }
+        match best {
+            Some((_, bleeding)) if region.bleeding <= bleeding => {}
+            _ => best = Some((index, region.bleeding)),
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
+/// Highest infection above zero. A tie keeps the earlier region.
+fn worst_infected(regions: &[Region]) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (index, region) in regions.iter().enumerate() {
+        if region.infected <= 0.0 {
+            continue;
+        }
+        match best {
+            Some((_, infected)) if region.infected <= infected => {}
+            _ => best = Some((index, region.infected)),
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
+fn apply_treatment(person: &mut Person, item: ItemId) {
+    if item == ITEM_BANDAGE {
+        if let Some(index) = worst_bleeding(&person.regions) {
+            person.regions[index].bandaged = true;
+            person.regions[index].bleeding = 0.0;
+        }
+    } else if item == ITEM_SALVE {
+        if let Some(index) = worst_infected(&person.regions) {
+            person.regions[index].infected =
+                (person.regions[index].infected - SALVE_INFECTION_CUT).max(0.0);
+            person.regions[index].treated = true;
+        }
     }
 }
 
@@ -1259,11 +1619,42 @@ impl Person {
             dest: None,
             target: None,
             gather_ticks: 0,
+            fatigue: 0.0,
+            warmth: 1.0,
+            skills: [0.0; SKILL_COUNT],
+            regions: std::array::from_fn(|_| Region::healthy()),
         }
     }
 
     fn pos(&self) -> [f32; 2] {
         [self.x, self.y]
+    }
+
+    fn sick(&self) -> bool {
+        self.regions
+            .iter()
+            .any(|region| region.infected >= INFECTION_SICK)
+    }
+}
+
+impl Region {
+    fn healthy() -> Self {
+        Self {
+            health: 1.0,
+            bleeding: 0.0,
+            infected: 0.0,
+            bandaged: false,
+            treated: false,
+        }
+    }
+
+    /// A hurt region keeps accumulating infection. A fresh region does not.
+    fn is_wound(&self) -> bool {
+        self.bleeding > 0.0
+            || self.infected > 0.0
+            || self.bandaged
+            || self.treated
+            || self.health < 1.0
     }
 }
 
@@ -1310,6 +1701,22 @@ fn person_view(person: &Person) -> PersonView {
         path,
         dest,
         target,
+        fatigue: person.fatigue,
+        warmth: person.warmth,
+        skills: person.skills,
+        regions: person
+            .regions
+            .iter()
+            .enumerate()
+            .map(|(index, region)| RegionView {
+                kind: index as u32,
+                health: region.health,
+                bleeding: region.bleeding,
+                infected: region.infected,
+                bandaged: region.bandaged,
+                treated: region.treated,
+            })
+            .collect(),
     }
 }
 
@@ -1430,6 +1837,18 @@ fn hash_person(hash: &mut Fnv64, person: &Person) {
     }
     hash.write_u32(person.gather_ticks);
     hash_order(hash, person.order);
+    hash.write_f32(person.fatigue);
+    hash.write_f32(person.warmth);
+    for skill in person.skills {
+        hash.write_f32(skill);
+    }
+    for region in &person.regions {
+        hash.write_f32(region.health);
+        hash.write_f32(region.bleeding);
+        hash.write_f32(region.infected);
+        hash.write_u8(u8::from(region.bandaged));
+        hash.write_u8(u8::from(region.treated));
+    }
 }
 
 fn hash_order(hash: &mut Fnv64, order: Option<Command>) {
@@ -1483,6 +1902,12 @@ fn hash_order(hash: &mut Fnv64, order: Option<Command>) {
             hash.write_u32(item.0);
             hash.write_u32(from.index);
             hash.write_u32(from.generation);
+        }
+        Some(Command::Heal { item, target, .. }) => {
+            hash.write_u8(11);
+            hash.write_u32(item.0);
+            hash.write_u32(target.index);
+            hash.write_u32(target.generation);
         }
     }
 }
@@ -1579,10 +2004,41 @@ pub(crate) struct SavedSlot {
     /// Stockpile contents, `[item_id, count]`, sorted by item id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contents: Vec<[u32; 2]>,
+    /// Omitted on a non-person. Present, including 0, on a person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fatigue: Option<f32>,
+    /// Omitted on a non-person. A missing person value loads as 1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warmth: Option<f32>,
+    /// Four skills, gather then build, craft, medicine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<[f32; 4]>,
+    /// Six regions in RegionKind order. Empty on a non-person.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regions: Vec<SavedRegion>,
 }
 
 fn is_zero(value: &u32) -> bool {
     *value == 0
+}
+
+fn default_region_health() -> f32 {
+    1.0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SavedRegion {
+    kind: u32,
+    #[serde(default = "default_region_health")]
+    health: f32,
+    #[serde(default)]
+    bleeding: f32,
+    #[serde(default)]
+    infected: f32,
+    #[serde(default)]
+    bandaged: bool,
+    #[serde(default)]
+    treated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1598,6 +2054,7 @@ pub(crate) enum SavedOrder {
     Draft { drafted: bool },
     Attack { target: [u32; 2] },
     Take { item: u32, from: [u32; 2] },
+    Heal { item: u32, target: [u32; 2] },
 }
 
 impl SavedSlot {
@@ -1633,6 +2090,10 @@ impl SavedSlot {
             yield_item: None,
             progress: 0,
             contents: Vec::new(),
+            fatigue: None,
+            warmth: None,
+            skills: None,
+            regions: Vec::new(),
         };
         let id = EntityId {
             index: view.index,
@@ -1656,6 +2117,22 @@ impl SavedSlot {
             slot.dest = person.dest;
             slot.target = person.target.map(|id| [id.index, id.generation]);
             slot.gather_ticks = person.gather_ticks;
+            slot.fatigue = Some(person.fatigue);
+            slot.warmth = Some(person.warmth);
+            slot.skills = Some(person.skills);
+            slot.regions = person
+                .regions
+                .iter()
+                .enumerate()
+                .map(|(index, region)| SavedRegion {
+                    kind: index as u32,
+                    health: region.health,
+                    bleeding: region.bleeding,
+                    infected: region.infected,
+                    bandaged: region.bandaged,
+                    treated: region.treated,
+                })
+                .collect();
         } else if let Some(building) = sim.buildings.iter().find(|b| b.id == id) {
             slot.x = building.x;
             slot.y = building.y;
@@ -1703,6 +2180,10 @@ impl SavedOrder {
             Command::Take { item, from, .. } => Self::Take {
                 item: item.0,
                 from: [from.index, from.generation],
+            },
+            Command::Heal { item, target, .. } => Self::Heal {
+                item: item.0,
+                target: [target.index, target.generation],
             },
         }
     }
@@ -1759,8 +2240,39 @@ impl SavedOrder {
                     generation: from[1],
                 },
             },
+            Self::Heal { item, target } => Command::Heal {
+                actor,
+                item: ItemId(item),
+                target: EntityId {
+                    index: target[0],
+                    generation: target[1],
+                },
+            },
         })
     }
+}
+
+fn regions_from_saved(saved: &[SavedRegion]) -> Result<[Region; 6], &'static str> {
+    if saved.is_empty() {
+        return Ok(std::array::from_fn(|_| Region::healthy()));
+    }
+    if saved.len() != RegionKind::ALL.len() {
+        return Err("a person does not have six regions");
+    }
+    let mut regions = std::array::from_fn(|_| Region::healthy());
+    for (index, region) in saved.iter().enumerate() {
+        if region.kind != index as u32 || RegionKind::from_discriminant(region.kind).is_none() {
+            return Err("region kind is not in RegionKind order");
+        }
+        regions[index] = Region {
+            health: region.health,
+            bleeding: region.bleeding,
+            infected: region.infected,
+            bandaged: region.bandaged,
+            treated: region.treated,
+        };
+    }
+    Ok(regions)
 }
 
 pub(crate) fn world_from_saved(saved: SavedWorld) -> Result<LoadedWorld, &'static str> {
@@ -1816,6 +2328,8 @@ pub(crate) fn world_from_saved(saved: SavedWorld) -> Result<LoadedWorld, &'stati
                     }
                     add_carried(&mut carried, ItemId(pair[0]), pair[1]);
                 }
+                let regions = regions_from_saved(&slot.regions)?;
+                let skills = slot.skills.unwrap_or([0.0; SKILL_COUNT]);
                 people.push(Person {
                     id,
                     x: slot.x,
@@ -1834,6 +2348,10 @@ pub(crate) fn world_from_saved(saved: SavedWorld) -> Result<LoadedWorld, &'stati
                         generation: pair[1],
                     }),
                     gather_ticks: slot.gather_ticks,
+                    fatigue: slot.fatigue.unwrap_or(0.0),
+                    warmth: slot.warmth.unwrap_or(1.0),
+                    skills,
+                    regions,
                 });
             }
             Some("building") => {

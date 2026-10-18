@@ -502,7 +502,11 @@ fn refusal(sim: &SimState) -> String {
 }
 
 #[test]
-fn needs_empty_in_days_and_health_falls_only_at_zero() {
+/// The hunger-and-thirst rule only. From milestone 2, cold at zero warmth, an
+/// unbandaged bleed and an infection past the sickness line all drain health as
+/// well, so a full day of play no longer leaves health at 1.0 — an open night now
+/// costs about a tenth of it — and this test says nothing about that.
+fn needs_empty_in_days_and_health_falls_at_zero() {
     assert_eq!(HUNGER_FULL_TICKS, 2 * TICKS_PER_DAY);
     assert_eq!(THIRST_FULL_TICKS, TICKS_PER_DAY * 8 / 5);
     assert_eq!(HEALTH_FULL_TICKS, TICKS_PER_DAY);
@@ -518,7 +522,8 @@ fn needs_empty_in_days_and_health_falls_only_at_zero() {
     assert_eq!(person.thirst.to_bits(), (1.0 - THIRST_PER_TICK).to_bits());
     assert_eq!(person.health.to_bits(), 1.0f32.to_bits());
 
-    // A whole day at 1x leaves nobody hungry enough to refuse work, nobody hurt.
+    // A whole day at 1x leaves nobody hungry enough to refuse work. Health is
+    // not untouched: the open night costs about a tenth to cold, not to needs.
     for _ in 0..TICKS_PER_DAY {
         sim.step();
     }
@@ -528,7 +533,11 @@ fn needs_empty_in_days_and_health_falls_only_at_zero() {
         "a day of play left hunger at {}",
         after_a_day.hunger
     );
-    assert_eq!(after_a_day.health.to_bits(), 1.0f32.to_bits());
+    assert!(
+        (1.0 - after_a_day.health - 0.1).abs() < 1e-3,
+        "a day in the open costs about a tenth of health to cold, got {}",
+        after_a_day.health
+    );
 
     let mut starving = edit(&started(1), |value| {
         let slot = slot_mut(value, 0);

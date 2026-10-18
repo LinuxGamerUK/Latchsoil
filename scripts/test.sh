@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The acceptance gate: the sim's own tests with no engine in the process, then
 # the headless Godot checks — the milestone 0 load, the milestone 1a orders,
-# and the milestone 1b buildings, craft, haul and save. This is what CI runs.
+# the milestone 1b buildings, craft, haul and save, and the milestone 2 body.
+# This is what CI runs.
 #
 # Run from the repository root, either directly or as `nix run .#test`.
 set -euo pipefail
@@ -26,3 +27,7 @@ echo "== headless Godot: milestone 1a orders, paths and failure reasons =="
 echo
 echo "== headless Godot: milestone 1b buildings, craft, haul and save =="
 "$root/scripts/check-1b.sh"
+
+echo
+echo "== headless Godot: milestone 2 body, skills and save =="
+"$root/scripts/check-2.sh"

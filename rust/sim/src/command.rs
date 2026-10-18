@@ -53,6 +53,11 @@ pub enum Command {
         item: ItemId,
         from: EntityId,
     },
+    Heal {
+        actor: EntityId,
+        target: EntityId,
+        item: ItemId,
+    },
 }
 
 impl Command {
@@ -67,7 +72,8 @@ impl Command {
             | Self::Craft { actor, .. }
             | Self::Draft { actor, .. }
             | Self::Attack { actor, .. }
-            | Self::Take { actor, .. } => actor,
+            | Self::Take { actor, .. }
+            | Self::Heal { actor, .. } => actor,
         }
     }
 
@@ -84,6 +90,7 @@ impl Command {
             Self::Draft { .. } => "draft",
             Self::Attack { .. } => "attack",
             Self::Take { .. } => "take",
+            Self::Heal { .. } => "heal",
         }
     }
 
@@ -101,6 +108,7 @@ impl Command {
                 | Self::Place { .. }
                 | Self::Craft { .. }
                 | Self::Take { .. }
+                | Self::Heal { .. }
         )
     }
 }
@@ -119,7 +127,7 @@ pub struct ItemId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecipeId(pub u32);
 
-/// From 0: Haul, Build, Farm, Craft, Heal, Cook, Guard.
+/// From 0: Haul, Build, Farm, Craft, Heal, Cook, Guard, Rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum JobKind {
@@ -130,6 +138,7 @@ pub enum JobKind {
     Heal = 4,
     Cook = 5,
     Guard = 6,
+    Rest = 7,
 }
 
 impl JobKind {
@@ -146,6 +155,7 @@ impl JobKind {
             4 => Self::Heal,
             5 => Self::Cook,
             6 => Self::Guard,
+            7 => Self::Rest,
             _ => return None,
         })
     }
@@ -202,6 +212,7 @@ pub enum FailureReason {
     Night = 5,
     Wounded = 6,
     NoStation = 7,
+    Tired = 8,
 }
 
 impl FailureReason {
@@ -219,6 +230,7 @@ impl FailureReason {
             5 => Self::Night,
             6 => Self::Wounded,
             7 => Self::NoStation,
+            8 => Self::Tired,
             _ => return None,
         })
     }
@@ -234,6 +246,7 @@ impl FailureReason {
             Self::Night => "night",
             Self::Wounded => "wounded",
             Self::NoStation => "no station",
+            Self::Tired => "tired",
         }
     }
 }
@@ -241,6 +254,47 @@ impl FailureReason {
 impl fmt::Display for FailureReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// From 0: Head, Torso, LeftArm, RightArm, LeftLeg, RightLeg.
+///
+/// Every person has exactly these six, in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RegionKind {
+    Head = 0,
+    Torso = 1,
+    LeftArm = 2,
+    RightArm = 3,
+    LeftLeg = 4,
+    RightLeg = 5,
+}
+
+impl RegionKind {
+    pub const ALL: [Self; 6] = [
+        Self::Head,
+        Self::Torso,
+        Self::LeftArm,
+        Self::RightArm,
+        Self::LeftLeg,
+        Self::RightLeg,
+    ];
+
+    pub fn discriminant(self) -> u32 {
+        self as u32
+    }
+
+    pub fn from_discriminant(value: u32) -> Option<Self> {
+        Some(match value {
+            0 => Self::Head,
+            1 => Self::Torso,
+            2 => Self::LeftArm,
+            3 => Self::RightArm,
+            4 => Self::LeftLeg,
+            5 => Self::RightLeg,
+            _ => return None,
+        })
     }
 }
 
@@ -259,6 +313,7 @@ mod tests {
             (FailureReason::Night, "night", 5),
             (FailureReason::Wounded, "wounded", 6),
             (FailureReason::NoStation, "no station", 7),
+            (FailureReason::Tired, "tired", 8),
         ];
         for (reason, word, disc) in cases {
             assert_eq!(reason.as_str(), word);
@@ -266,16 +321,22 @@ mod tests {
             assert_eq!(reason.discriminant(), disc);
             assert_eq!(FailureReason::from_discriminant(disc as u32), Some(reason));
         }
-        assert_eq!(FailureReason::from_discriminant(8), None);
+        assert_eq!(FailureReason::from_discriminant(9), None);
     }
 
     #[test]
     fn unknown_job_and_building_discriminants_are_rejected() {
-        assert_eq!(JobKind::from_discriminant(7), None);
+        assert_eq!(JobKind::from_discriminant(8), None);
+        assert_eq!(JobKind::from_discriminant(7), Some(JobKind::Rest));
+        assert_eq!(JobKind::Rest.discriminant(), 7);
         assert_eq!(BuildingKind::from_discriminant(9), None);
         assert_eq!(JobKind::Haul.discriminant(), 0);
         assert_eq!(BuildingKind::Campfire.discriminant(), 0);
         assert_eq!(JobKind::Guard.discriminant(), 6);
         assert_eq!(BuildingKind::Palisade.discriminant(), 8);
+        assert_eq!(RegionKind::Head.discriminant(), 0);
+        assert_eq!(RegionKind::RightLeg.discriminant(), 5);
+        assert_eq!(RegionKind::from_discriminant(6), None);
+        assert_eq!(RegionKind::ALL.len(), 6);
     }
 }

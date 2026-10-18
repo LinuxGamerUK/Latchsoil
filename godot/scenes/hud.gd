@@ -15,6 +15,8 @@ signal build_kind_chosen(kind: int)
 signal craft_chosen(slot: int)
 signal haul_asked
 signal take_asked
+signal heal_asked
+signal sleep_asked
 
 var _build_buttons: Array = []
 
@@ -65,11 +67,12 @@ func _add_detail_line() -> void:
 	var detail := Label.new()
 	detail.name = "Detail"
 	detail.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	detail.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	detail.offset_left = 14.0
-	detail.offset_top = 84.0
+	detail.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	detail.offset_left = -460.0
+	detail.offset_top = 8.0
 	detail.offset_right = -14.0
-	detail.offset_bottom = 280.0
+	detail.offset_bottom = 320.0
+	detail.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	detail.add_theme_font_size_override("font_size", 20)
 	detail.add_theme_color_override("font_color", Color(0.97, 0.94, 0.86))
 	detail.add_theme_color_override("font_outline_color", Color(0.10, 0.07, 0.04))
@@ -110,6 +113,14 @@ func _add_bar() -> void:
 	var take := _button("take")
 	take.pressed.connect(func() -> void: take_asked.emit())
 	bar.add_child(take)
+	bar.add_child(_gap())
+	var heal := _button("heal")
+	heal.name = "Heal"
+	heal.pressed.connect(func() -> void: heal_asked.emit())
+	bar.add_child(heal)
+	var sleep := _button("sleep")
+	sleep.pressed.connect(func() -> void: sleep_asked.emit())
+	bar.add_child(sleep)
 
 
 func _button(text: String) -> Button:
@@ -145,6 +156,12 @@ func set_build_highlight(kind: int) -> void:
 		button.modulate = Color(1.0, 0.82, 0.28) if i == kind else Color.WHITE
 
 
+func set_heal_highlight(on: bool) -> void:
+	var heal := get_node_or_null("Bar/Heal") as Button
+	if heal != null:
+		heal.modulate = Color(1.0, 0.82, 0.28) if on else Color.WHITE
+
+
 func show_state(tick: int, paused: bool, selected: int, failure_text: String) -> void:
 	# `/` is float division. Tick is never negative, so truncating matches the sim's day().
 	var day_index := int(float(tick) / float(TICKS_PER_DAY))
@@ -153,7 +170,7 @@ func show_state(tick: int, paused: bool, selected: int, failure_text: String) ->
 	var text := "tick %d  day %d  season %s" % [tick, day_index, season]
 	if paused:
 		text += "  PAUSED"
-	text += "  selected %d  B build  C craft  H haul  T take  F eat" % selected
+	text += "  selected %d  B build  C craft  H haul  T take  F eat  J heal  R sleep" % selected
 	line.text = text
 	# The sim's string is the whole line. No name, no prefix, no second wording.
 	var reason := get_node_or_null("Reason") as Label
