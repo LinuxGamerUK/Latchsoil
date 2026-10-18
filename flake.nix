@@ -56,11 +56,11 @@
       apps = forAll (pkgs: {
         test = {
           type = "app";
-          program = appScript pkgs "latchsoil-test" ./scripts/test.sh;
+          program = "${appScript pkgs "latchsoil-test" ./scripts/test.sh}";
         };
         smoke = {
           type = "app";
-          program = appScript pkgs "latchsoil-smoke" ./scripts/smoke.sh;
+          program = "${appScript pkgs "latchsoil-smoke" ./scripts/smoke.sh}";
         };
       });
     };
