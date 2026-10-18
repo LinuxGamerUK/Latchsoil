@@ -16,7 +16,12 @@ const BESIDE_PEG_M := 3.5
 const ARRIVE_M := 1.5
 const GATHER_NEAR_M := 1.25
 const MOVED_M := 4.0
-const HUNGER_PER_TICK := 1.0 / 60.0
+# The bridge contract's rate, kept here as the harness's own copy rather than
+# read from the sim: a full person is empty after two days of 7200 ticks.
+const HUNGER_FULL_TICKS := 14400.0
+const HUNGER_PER_TICK := 1.0 / HUNGER_FULL_TICKS
+# Grain each person of the starting cast carries: the Harth kit's ration.
+const RATION := 4
 const MAX_MOVE_TICKS := 200
 const MAX_GATHER_TICKS := 800
 const MAX_FAIL_TICKS := 80
@@ -303,8 +308,14 @@ func run_cast() -> void:
 		if abs(float(person.get("hunger", -1.0)) - 1.0) > 0.0001:
 			fail("cast", "person %d hunger %s, expected 1" % [index, str(person.get("hunger"))])
 			return
-		if array_size(person.get("carried", [])) != 0:
-			fail("cast", "person %d is already carrying %s" % [index, str(person.get("carried"))])
+		# The Harth kit's ration. Milestone 1a has no food in the world, so this
+		# is the only reason `Eat` can succeed at all.
+		var ration := carried_count(person, catalog_id("grain"))
+		if ration != 4:
+			fail("cast", "person %d carries %d grain, expected 4 (%s)" % [index, ration, str(person.get("carried"))])
+			return
+		if array_size(person.get("carried", [])) != 1:
+			fail("cast", "person %d carries more than grain: %s" % [index, str(person.get("carried"))])
 			return
 	if not seen.has(0) or not seen.has(1) or not seen.has(2):
 		fail("cast", "people indices are not 0, 1, 2 (%s)" % positions_text(s))
@@ -560,19 +571,35 @@ func run_eat_empty() -> void:
 	var s := snap()
 	if failed:
 		return
-	var wood := wood_node(s)
-	if wood.is_empty():
-		fail("eat-empty", "no wood node to name a real item id")
+	# The cast starts with the Harth ration, so empty the hands by eating it and
+	# then ask for one more: 'no material' is about having nothing left to eat.
+	var grain_id := catalog_id("grain")
+	if grain_id < 0:
+		fail("eat-empty", "no grain item in the catalog")
 		return
-	var item_id := int(wood["yield_item"])
 	var person := person_by_index(s, 0)
 	if person.is_empty():
 		fail("eat-empty", "person 0 missing")
 		return
-	if array_size(person.get("carried", [])) != 0:
-		fail("eat-empty", "person 0 is already carrying %s" % str(person.get("carried")))
+	if carried_count(person, grain_id) != RATION:
+		fail("eat-empty", "person 0 carries %s, expected %d grain" % [str(person.get("carried")), RATION])
 		return
-	var code = host.call("submit_eat", 0, int(person["generation"]), item_id)
+	for _i in RATION:
+		var bite = host.call("submit_eat", 0, int(person["generation"]), grain_id)
+		if bite == null or int(bite) != 0:
+			fail("eat-empty", "submit_eat returned %s" % str(bite))
+			return
+		if drive_one(false) != 1:
+			fail("eat-empty", "step did not advance one tick")
+			return
+	s = snap()
+	if failed:
+		return
+	person = person_by_index(s, 0)
+	if carried_count(person, grain_id) != 0:
+		fail("eat-empty", "ration still carried after %d meals: %s" % [RATION, str(person.get("carried"))])
+		return
+	var code = host.call("submit_eat", 0, int(person["generation"]), grain_id)
 	if code == null or int(code) != 0:
 		fail("eat-empty", "submit_eat returned %s" % str(code))
 		return

@@ -1,8 +1,11 @@
 //! Milestone 1a constants. Each threshold sits next to the test that names it.
 //!
-//! Hunger falls by [`HUNGER_PER_TICK`] every tick. The bridge's "about 1.7 days"
-//! remark does not match that rate (60 ticks is 6 seconds at 1x); the rate in
-//! the 1a section is what the rules use.
+//! Needs fall at a rate measured in days, because that is how the play calendar
+//! is described: a day is 12 minutes at 1x. An earlier revision said "hunger
+//! falls 1/60 per tick", which empties a person in six seconds and refuses every
+//! work order after four seconds of play — the blockout was unplayable and the
+//! mistake was a contradiction between that rate and the "hungry in 1.7 days"
+//! sentence in the same paragraph of the bridge contract.
 
 use crate::clock::TICKS_PER_DAY;
 
@@ -28,14 +31,27 @@ pub const GATHER_TICKS_PER_UNIT: u32 = 20;
 /// A person carries at most this many units, across every item.
 pub const CARRY_CAP: u32 = 20;
 
-/// Hunger lost each tick. A full person is empty after 60 ticks, clamped.
-pub const HUNGER_PER_TICK: f32 = 1.0 / 60.0;
+/// Ticks from a full person to an empty one. Two days at 1x, which is the
+/// sentence the lore is written against ("hunger bites on day 2").
+pub const HUNGER_FULL_TICKS: u64 = 2 * TICKS_PER_DAY;
+/// Hunger lost each tick. A full person is empty after two days, clamped.
+pub const HUNGER_PER_TICK: f32 = 1.0 / (HUNGER_FULL_TICKS as f32);
 
+/// Ticks from full to empty for thirst. A little sooner than hunger, so water is
+/// the first need that bites.
+pub const THIRST_FULL_TICKS: u64 = TICKS_PER_DAY * 8 / 5;
 /// Thirst lost each tick.
-pub const THIRST_PER_TICK: f32 = 1.0 / 90.0;
+pub const THIRST_PER_TICK: f32 = 1.0 / (THIRST_FULL_TICKS as f32);
 
+/// Ticks from full health to none, once a need has reached zero.
+pub const HEALTH_FULL_TICKS: u64 = TICKS_PER_DAY;
 /// Health lost each tick while hunger or thirst is exactly 0.
-pub const HEALTH_PER_TICK: f32 = 1.0 / 1200.0;
+pub const HEALTH_PER_TICK: f32 = 1.0 / (HEALTH_FULL_TICKS as f32);
+
+/// Grain each person of the starting cast carries: the Harth kit's ration, two
+/// days of meals at two a day. Milestone 1a has no food in the world, so without
+/// it `Eat` can never succeed and the hunger refusal is a dead end.
+pub const STARTING_GRAIN: u32 = 4;
 
 /// Work is refused when hunger is strictly below this.
 pub const HUNGER_REFUSAL: f32 = 0.35;

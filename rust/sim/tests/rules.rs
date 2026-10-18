@@ -6,15 +6,25 @@
 use latchsoil_sim::{
     load_from_json, night_at, save_to_json, BuildingKind, Command, EntityId, FailureReason, ItemId,
     JobKind, SimState, CARRY_CAP, EAT_HUNGER_RESTORE, EAT_THIRST_RESTORE, GATHER_TICKS_PER_UNIT,
-    HEALTH_PER_TICK, HEALTH_REFUSAL, HUNGER_PER_TICK, HUNGER_REFUSAL, ITEM_GRAIN, ITEM_WOOD,
-    MALFORMED, NIGHT_START_TICK, PEG_X, PEG_Y, QUEUED, QUEUE_CAP, QUEUE_FULL, STALE,
-    TICKS_PER_DAY, WALK_METERS_PER_TICK, WAYPOINT_REACH_METERS,
+    HEALTH_FULL_TICKS, HEALTH_PER_TICK, HEALTH_REFUSAL, HUNGER_FULL_TICKS, HUNGER_PER_TICK,
+    HUNGER_REFUSAL, ITEM_GRAIN, ITEM_WOOD, MALFORMED, NIGHT_START_TICK, PEG_X, PEG_Y, QUEUED,
+    QUEUE_CAP, QUEUE_FULL, STALE, STARTING_GRAIN, THIRST_FULL_TICKS, THIRST_PER_TICK, TICKS_PER_DAY,
+    WALK_METERS_PER_TICK, WAYPOINT_REACH_METERS,
 };
 
 fn started(seed: u64) -> SimState {
     let mut sim = SimState::new(seed);
     sim.new_game(seed);
     sim
+}
+
+/// Units of one item in a carry list, so a test can ignore the starting ration.
+fn carried_of(carried: &[[u32; 2]], item: u32) -> u32 {
+    carried
+        .iter()
+        .filter(|pair| pair[0] == item)
+        .map(|pair| pair[1])
+        .sum()
 }
 
 fn view_person(sim: &SimState, index: u32) -> latchsoil_sim::PersonView {
@@ -79,7 +89,7 @@ fn same_seed_reproduces_the_acre_and_a_different_seed_does_not() {
         assert_eq!(person.hunger.to_bits(), 1.0f32.to_bits());
         assert_eq!(person.thirst.to_bits(), 1.0f32.to_bits());
         assert_eq!(person.health.to_bits(), 1.0f32.to_bits());
-        assert!(person.carried.is_empty());
+        assert_eq!(person.carried, vec![[ITEM_GRAIN.0, STARTING_GRAIN]]);
         assert!(dist([person.x, person.y], [PEG_X, PEG_Y]) <= 1.5);
         assert!(dist([person.x, person.y], [PEG_X, PEG_Y]) >= 1.0);
     }
@@ -213,7 +223,7 @@ fn gather_walks_adds_one_per_20_ticks_caps_at_20_and_drain_fails() {
         let walker = view_person(&sim, 0);
         assert_eq!(walker.failure, -1, "{}", walker.failure_text);
         if walker.path.is_empty()
-            && walker.carried.is_empty()
+            && carried_of(&walker.carried, wood.yield_item) == 0
             && dist([walker.x, walker.y], node_pos) <= WAYPOINT_REACH_METERS
         {
             break;
@@ -222,12 +232,12 @@ fn gather_walks_adds_one_per_20_ticks_caps_at_20_and_drain_fails() {
     assert!(guard > 1, "gather must walk before the first unit");
     for _ in 0..(GATHER_TICKS_PER_UNIT - 1) {
         sim.step();
-        assert!(view_person(&sim, 0).carried.is_empty());
+        assert_eq!(carried_of(&view_person(&sim, 0).carried, wood.yield_item), 0);
         assert_eq!(view_node(&sim, wood.index).remaining, 40);
     }
     sim.step();
     let carrying = view_person(&sim, 0);
-    assert_eq!(carrying.carried, vec![[wood.yield_item, 1]]);
+    assert_eq!(carried_of(&carrying.carried, wood.yield_item), 1);
     assert_eq!(view_node(&sim, wood.index).remaining, 39);
     assert_eq!(GATHER_TICKS_PER_UNIT, 20);
 
@@ -243,7 +253,8 @@ fn gather_walks_adds_one_per_20_ticks_caps_at_20_and_drain_fails() {
     let filled = view_person(&sim, 0).carried.iter().map(|pair| pair[1]).sum::<u32>();
     assert_eq!(filled, 20);
     let remaining_at_cap = view_node(&sim, wood.index).remaining;
-    assert_eq!(remaining_at_cap, 40 - 20);
+    // The cap counts the starting ration, so only sixteen units come off the node.
+    assert_eq!(remaining_at_cap, 40 - (CARRY_CAP - STARTING_GRAIN));
     for _ in 0..40 {
         sim.step();
     }
@@ -284,12 +295,29 @@ fn gather_walks_adds_one_per_20_ticks_caps_at_20_and_drain_fails() {
     assert!(drained.path.is_empty());
     assert!(drained.dest.is_empty());
     assert!(drained.target.is_empty());
-    assert_eq!(drained.carried, vec![[wood.yield_item, 1]]);
+    assert_eq!(carried_of(&drained.carried, wood.yield_item), 1);
     assert_eq!(view_node(&sim, wood.index).remaining, 0);
 }
 
 #[test]
 fn eat_succeeds_with_grain_and_fails_without() {
+    // The starting cast carries four grain, so grain can actually be eaten from a
+    // fresh game, and eating anything else leaves the ration alone.
+    let mut fed = started(5);
+    let person = view_person(&fed, 0);
+    assert_eq!(fed.submit_eat(0, person.generation, ITEM_GRAIN.0), QUEUED);
+    fed.step();
+    let ate = view_person(&fed, 0);
+    assert_eq!(ate.failure_text, "");
+    assert_eq!(carried_of(&ate.carried, ITEM_GRAIN.0), STARTING_GRAIN - 1);
+    let mut control = started(5);
+    control.step();
+    let unfed = view_person(&control, 0);
+    assert!(
+        ate.hunger > unfed.hunger && ate.thirst > unfed.thirst,
+        "eating must leave a person better fed and watered than the same tick without it"
+    );
+
     let mut empty = started(5);
     let person = view_person(&empty, 0);
     assert_eq!(empty.submit_eat(0, person.generation, ITEM_WOOD.0), QUEUED);
@@ -297,7 +325,7 @@ fn eat_succeeds_with_grain_and_fails_without() {
     let failed = view_person(&empty, 0);
     assert_eq!(failed.failure_text, "no material");
     assert_eq!(failed.failure, 2);
-    assert!(failed.carried.is_empty());
+    assert_eq!(failed.carried, vec![[ITEM_GRAIN.0, STARTING_GRAIN]]);
     assert!(failed.hunger < 1.0);
 
     let mut sim = edit(&started(5), |value| {
@@ -366,12 +394,14 @@ fn hungry_wounded_and_night_follow_thresholds_and_precedence() {
     let wound_only = with_needs(0.5, 1.0, 0.1, 100);
     assert_eq!(refusal(&wound_only), "wounded");
 
-    // Eat is not a work order: hunger does not refuse the submit.
+    // Eat is not a work order: hunger does not refuse it, it goes through.
     let mut starving = with_needs(0.1, 1.0, 1.0, 0);
     let person = view_person(&starving, 0);
     assert_eq!(starving.submit_eat(0, person.generation, ITEM_GRAIN.0), QUEUED);
     starving.step();
-    assert_eq!(view_person(&starving, 0).failure_text, "no material");
+    let fed = view_person(&starving, 0);
+    assert_eq!(fed.failure_text, "", "a starving person may still eat");
+    assert_eq!(carried_of(&fed.carried, ITEM_GRAIN.0), STARTING_GRAIN - 1);
 
     // Gather is a work order.
     let mut sim = with_needs(0.1, 1.0, 1.0, 0);
@@ -415,32 +445,46 @@ fn refusal(sim: &SimState) -> String {
 }
 
 #[test]
-fn hunger_falls_one_sixtieth_and_health_falls_only_at_zero() {
-    assert_eq!(HUNGER_PER_TICK, 1.0 / 60.0);
-    assert_eq!(HEALTH_PER_TICK, 1.0 / 1200.0);
+fn needs_empty_in_days_and_health_falls_only_at_zero() {
+    assert_eq!(HUNGER_FULL_TICKS, 2 * TICKS_PER_DAY);
+    assert_eq!(THIRST_FULL_TICKS, TICKS_PER_DAY * 8 / 5);
+    assert_eq!(HEALTH_FULL_TICKS, TICKS_PER_DAY);
+    assert_eq!(HUNGER_PER_TICK, 1.0 / (HUNGER_FULL_TICKS as f32));
+    assert_eq!(THIRST_PER_TICK, 1.0 / (THIRST_FULL_TICKS as f32));
+    assert_eq!(HEALTH_PER_TICK, 1.0 / (HEALTH_FULL_TICKS as f32));
+    assert!(THIRST_FULL_TICKS < HUNGER_FULL_TICKS, "thirst bites first");
+
     let mut sim = started(1);
     sim.step();
     let person = view_person(&sim, 0);
     assert_eq!(person.hunger.to_bits(), (1.0 - HUNGER_PER_TICK).to_bits());
-    assert_eq!(person.thirst.to_bits(), (1.0 - latchsoil_sim::THIRST_PER_TICK).to_bits());
+    assert_eq!(person.thirst.to_bits(), (1.0 - THIRST_PER_TICK).to_bits());
     assert_eq!(person.health.to_bits(), 1.0f32.to_bits());
 
-    for _ in 0..59 {
+    // A whole day at 1x leaves nobody hungry enough to refuse work, nobody hurt.
+    for _ in 0..TICKS_PER_DAY {
         sim.step();
     }
-    let still = view_person(&sim, 0);
-    assert!(still.hunger > 0.0, "60 ticks of f32 subtraction do not land on 0");
-    assert!(still.thirst > 0.0);
-    assert_eq!(still.health.to_bits(), 1.0f32.to_bits());
-    sim.step();
-    let empty = view_person(&sim, 0);
-    assert_eq!(empty.hunger, 0.0);
-    assert!(empty.thirst > 0.0);
-    assert_eq!(empty.health.to_bits(), (1.0 - HEALTH_PER_TICK).to_bits());
+    let after_a_day = view_person(&sim, 0);
+    assert!(
+        after_a_day.hunger > HUNGER_REFUSAL,
+        "a day of play left hunger at {}",
+        after_a_day.hunger
+    );
+    assert_eq!(after_a_day.health.to_bits(), 1.0f32.to_bits());
+
+    let mut starving = edit(&started(1), |value| {
+        let slot = slot_mut(value, 0);
+        slot["hunger"] = serde_json::json!(0.0f32);
+        slot["health"] = serde_json::json!(1.0f32);
+    });
+    starving.step();
+    let person = view_person(&starving, 0);
+    assert_eq!(person.hunger, 0.0);
+    assert_eq!(person.health.to_bits(), (1.0 - HEALTH_PER_TICK).to_bits());
 
     let mut thirsty = edit(&started(1), |value| {
         let slot = slot_mut(value, 0);
-        slot["hunger"] = serde_json::json!(1.0f32);
         slot["thirst"] = serde_json::json!(0.0f32);
         slot["health"] = serde_json::json!(1.0f32);
     });
@@ -449,6 +493,34 @@ fn hunger_falls_one_sixtieth_and_health_falls_only_at_zero() {
     assert!(person.hunger > 0.0);
     assert_eq!(person.thirst, 0.0);
     assert_eq!(person.health.to_bits(), (1.0 - HEALTH_PER_TICK).to_bits());
+}
+
+#[test]
+fn work_is_accepted_for_minutes_before_hunger_refuses_it() {
+    // The defect this covers: the contract gave hunger as a per-tick fraction
+    // (1/60) while the same paragraph promised a full person lasted days. The
+    // literal rate refused every work order after four seconds of play, and a
+    // player reported it as "right clicking the ground doesn't seem to move them".
+    let mut sim = started(5);
+    let mut first_refusal = 0;
+    while first_refusal == 0 {
+        let person = view_person(&sim, 0);
+        assert_eq!(sim.submit_move(0, person.generation, PEG_X, PEG_Y), QUEUED);
+        sim.step();
+        if view_person(&sim, 0).failure_text == "hungry" {
+            first_refusal = sim.tick();
+        }
+        assert!(sim.tick() < 20_000, "hunger never refused a work order");
+    }
+    let expected = (HUNGER_FULL_TICKS as f64 * (1.0 - HUNGER_REFUSAL as f64)) as u64;
+    assert!(
+        first_refusal.abs_diff(expected) <= 4,
+        "hunger refused work at tick {first_refusal}, expected about {expected}"
+    );
+    assert!(
+        first_refusal > 9_000,
+        "work must be possible for minutes of play, not seconds (refused at tick {first_refusal})"
+    );
 }
 
 #[test]

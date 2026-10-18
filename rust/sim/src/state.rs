@@ -18,8 +18,8 @@ use crate::rules::{
     dist, night_at, BESIDE_PEG, CARRY_CAP, EAT_HUNGER_RESTORE, EAT_THIRST_RESTORE,
     FIBER_REMAINING, GATHER_TICKS_PER_UNIT, HEALTH_PER_TICK, HEALTH_REFUSAL, HUNGER_PER_TICK,
     HUNGER_REFUSAL, NODE_MIN_APART, NODE_MIN_FROM_PEG, OWNER_CAP, PEG_X, PEG_Y, QUEUE_CAP,
-    STONE_REMAINING, THIRST_PER_TICK, WALK_METERS_PER_TICK, WATER_REMAINING, WAYPOINT_REACH_METERS,
-    WOOD_REMAINING,
+    STARTING_GRAIN, STONE_REMAINING, THIRST_PER_TICK, WALK_METERS_PER_TICK, WATER_REMAINING,
+    WAYPOINT_REACH_METERS, WOOD_REMAINING,
 };
 use crate::snapshot::{BuildingView, NodeView, PersonView, Rejections, Snapshot};
 use serde::{Deserialize, Serialize};
@@ -422,7 +422,11 @@ impl SimState {
                 .alloc
                 .allocate(EntityKind::Person)
                 .expect("acre cast fits in the id space");
-            self.people.push(Person::new(id, at[0], at[1]));
+            let mut person = Person::new(id, at[0], at[1]);
+            // The Harth kit's ration. Milestone 1a has no food in the world, so
+            // this is what makes `Eat` reachable at all.
+            add_carried(&mut person.carried, ITEM_GRAIN, STARTING_GRAIN);
+            self.people.push(person);
         }
         let plan = [
             (ITEM_WOOD_YIELD, WOOD_REMAINING),
