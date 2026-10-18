@@ -40,3 +40,12 @@ What the build settled, so nobody rediscovers it:
 ## 2026-10-18 — needs rates are defined in days, not per-tick fractions
 
 1. **Needs rates are defined in days, not per-tick fractions.** A per-tick constant in the contract let a rule empty a person in six seconds while the same paragraph said 1.7 days, and the blockout was unplayable after four seconds as a result. Two guards: a person must be able to accept work for at least ten minutes of play at 1x before hunger refuses it, and the acre cast starts with four grain (`STARTING_GRAIN = 4`), because the acre yields no food.
+
+## 2026-10-18 — milestone 1b interface
+
+1. **`Command::Take` joins the enum.** A stockpile that can only receive goods is a hole, not a store: without a way out, hauling into it destroys the goods for every purpose the player has. The enum is closed, so this is a charter change and it is recorded here.
+2. **`FailureReason::NoStation` joins the enum.** A recipe that needs a fire or a shelter must say so in the one line the HUD prints. Reporting `no material` while the inputs are in hand would be a lie.
+3. **A building is built, not conjured.** `Place` allocates the building immediately, but it counts as a building only once `progress` reaches `BUILD_TICKS`, so `JobKind::Build` has a rule and the player watches a work site become a building. A half-built campfire is not a station.
+4. **`save_version` becomes 2, with no migration.** Nothing has shipped, so a version 1 save is refused rather than half-read. The save gains buildings, their progress and the contents of every stockpile.
+5. **The bandage heals nothing in 1b.** Wounds are milestone 2. The item exists so the lean-to has a reason and the fiber has a use; its rule does not exist yet, and no test may claim otherwise.
+6. **A recipe's station is a distance, not a room.** `STATION_RANGE_M = 2.0` keeps 1b free of interior spaces while still making placement matter. Interiors, if they ever exist, are a later milestone.

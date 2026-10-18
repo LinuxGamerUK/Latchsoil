@@ -163,3 +163,51 @@ This section says what the rules do in milestone 1a, so the tests and the scene 
 **Rules implemented:** `Move`, `Gather`, `Eat`. The other six commands are accepted, stored as the actor's current order, and carry out nothing yet; their rules arrive with the milestone that names them. `Place` therefore allocates nothing in 1a.
 
 **One owner is enough.** `attach`, `detach`, `snapshot` and the owner cap behave as described above, but `poll` returns a full snapshot every time, with `full` true and `removed` empty. Per-owner dirty sets arrive with the second consumer of the world state, and this file records the change when they do.
+
+## Milestone 1b — what the rules add
+
+This section narrows the contract above for milestone 1b: three buildings, a stockpile that holds goods, three recipes, one new command and one new failure reason. It does not extend the contract except where it names a recorded decision.
+
+**Two charter changes, both recorded in [00-decisions.md](00-decisions.md).** `Command::Take` joins the enum, because a stockpile that can only receive is a hole rather than a store. `FailureReason::NoStation` joins the enum, because a recipe that needs a fire has to say so in the one line the HUD prints.
+
+**New item ids**, continuing after water: `knife` 5, `meal` 6, `bandage` 7. **New recipe ids**, from 0: `knife` 0, `meal` 1, `bandage` 2.
+
+**New command.**
+
+```rust
+Take { actor: EntityId, item: ItemId, from: EntityId },
+```
+
+`from` must be a live building of kind `Stockpile`: a live id of another kind is malformed, a stale one is stale. The bridge method is `submit_take(actor_index, actor_gen, item_id, from_index, from_gen)`, returning 0 when the command is queued.
+
+**New failure reason.** `FailureReason::NoStation = 7`, string `no station`, accepted by `from_discriminant`. Precedence keeps the enum order, so `hungry` and `no path` are still reported before it.
+
+**The three buildings.** `BuildingKind::Campfire = 0`, `LeanTo = 1`, `Stockpile = 2`. One building per 1 m cell. A building id is allocated by `Place` during apply and read from the snapshot; the submit never returns it.
+
+**Placement.** `Place { actor, building, at }` requires `at` inside the acre, not the peg's cell, and no building already on that cell. If the cell is not reachable the order fails with `no path`. On success the building exists from the applying tick with `progress` 0, and the ordered person walks to it and works, `JobKind::Build`, for `BUILD_TICKS = 60` ticks while standing within `STATION_RANGE_M = 2.0 m`. A building is **finished** at `progress == BUILD_TICKS`; only a finished building is a station or holds goods.
+
+**The stockpile.** A stockpile holds at most `STOCKPILE_CAPACITY = 200` units across all items.
+
+**Haul.** `Haul { actor, item, to }`, `to` a stockpile. The person walks to it, then moves one carried unit every `HAUL_TICKS_PER_UNIT = 5` ticks until it carries none of that item or the store has no room. The order then completes: a part load left in hand is not a failure, and a full store is not one either. An item the actor does not carry fails with `no material`.
+
+**Take.** `Take { actor, item, from }`. The person walks to the store, then takes one unit every `TAKE_TICKS_PER_UNIT = 3` ticks until it reaches `CARRY_CAP` or the store holds none of that item. A store holding none of that item fails with `no material`.
+
+**The three recipes.** `Craft` draws its inputs from the actor's carried goods, checks them when the recipe starts, and adds one unit of the output to carried goods when it finishes. A missing input fails with `no material`. A tool the recipe names must be carried, or the order fails with `no material`. A recipe that needs a station fails with `no station` when no finished station of that kind stands within `STATION_RANGE_M`.
+
+| recipe | inputs | tool | station | ticks | output |
+| --- | --- | --- | --- | --- | --- |
+| knife | stone 1, wood 1 | — | — | 60 | knife 1 |
+| meal | grain 1, water 1 | — | campfire | 30 | meal 1 |
+| bandage | fiber 2, water 1 | knife | lean-to | 40 | bandage 1 |
+
+**What an item is worth when eaten.** `Eat` consumes one carried unit of the named item, or fails with `no material` when it is not carried. `grain` restores 0.35 hunger and 0.15 thirst, as in 1a. `meal` restores 0.75 hunger and 0.30 thirst, so cooking pays about twice over. `water` restores 0.00 hunger and 0.50 thirst. `wood`, `stone`, `fiber`, `knife` and `bandage` are not food and fail with `no material`.
+
+**A bandage heals nothing in 1b.** Wounds arrive in milestone 2. In 1b the bandage is craftable, carryable and storable, and no rule or test may claim it does more.
+
+**The save.** `save_version` becomes 2. A version 1 save is `MigrationNotImplemented`: nothing has shipped, so no migration is written. The save carries every building — id, kind, cell, `progress`, and the contents of each stockpile — alongside what it already carried: needs, positions, jobs, carried goods, the tick count and the RNG stream. Loading a save and running the same commands must reach the same state hash as the run the save came from. The camera is still not in the save.
+
+**Constants, each beside the test that names it:** `BUILD_TICKS` 60, `HAUL_TICKS_PER_UNIT` 5, `TAKE_TICKS_PER_UNIT` 3, `STATION_RANGE_M` 2.0, `STOCKPILE_CAPACITY` 200, recipe ticks 60 / 30 / 40, eat values as tabled.
+
+**Rules implemented after 1b:** `Move`, `Gather`, `Eat`, `Place`, `Craft`, `Haul`, `Take`. `Work`, `Draft` and `Attack` remain accepted and inert; their rules arrive with the milestones that name them.
+
+**Reasons 1b can produce:** the five from 1a plus `no station`. `no skill` and `afraid` still have no rule, so nothing returns them.
